@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# DEPRECATED: https://github.com/rootzoll/raspiblitz/issues/2264#issuecomment-872655605
+# script will stay on v1.7.1 ... but should be removed after that
+
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
  echo "# script to upload a file to DropBox (without third party libs)"
@@ -13,7 +16,7 @@ if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
  exit 1
 fi
 
-source /mnt/hdd/raspiblitz.conf
+source /mnt/hdd/app-data/raspiblitz.conf
 
 # get first parameter
 MODE="$1"
@@ -34,24 +37,15 @@ https://github.com/rootzoll/raspiblitz/#a-dropbox-backup-target" 11 70 2>/home/a
     shred -u /home/admin/.tmp
   fi
 
-  # quick check on authtoken
-  if [ ${#authtoken} -gt 80 ]; then
-     echo "err='authtoken unvalid'"
-     exit
-  fi
-
-  # set in config - that acivates the dropbox back in background process
+  # set in config - that activates the dropbox back in background process
   if [ ${#authtoken} -gt 0 ]; then
-    if [ ${#dropboxBackupTarget} -eq 0 ]; then
-      echo "dropboxBackupTarget='${authtoken}'" >> /mnt/hdd/raspiblitz.conf
-    fi
-    sudo sed -i "s/^dropboxBackupTarget=.*/dropboxBackupTarget='${authtoken}'/g" /mnt/hdd/raspiblitz.conf
+    /home/admin/config.scripts/blitz.conf.sh set dropboxBackupTarget "${authtoken}"
   fi
 
 elif [ "${MODE}" == "off" ]; then
 
   # to turn backup off - delete the parameter from the config file
-  sudo sed -i '/dropboxBackupTarget=.*/d' /mnt/hdd/raspiblitz.conf
+  /home/admin/config.scripts/blitz.conf.sh delete dropboxBackupTarget
 
 elif [ "${MODE}" == "check" ]; then
 
@@ -89,7 +83,7 @@ elif [ "${MODE}" == "upload" ]; then
     exit 1
   fi
 
-  source /mnt/hdd/raspiblitz.conf
+  source /mnt/hdd/app-data/raspiblitz.conf
   if [ ${#hostname} -eq 0 ]; then
     hostname="raspiblitz"
   fi
@@ -124,7 +118,7 @@ elif [ "${MODE}" == "upload" ]; then
   fi
 
 else
-  echo "err='unkown mode'"
+  echo "err='unknown mode'"
   exit 1
 fi
 

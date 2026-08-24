@@ -12,9 +12,13 @@ from pathlib import Path
 import grpc
 import requests
 import toml
-from blitzpy import RaspiBlitzConfig, BlitzError
-from lndlibs import rpc_pb2 as lnrpc
-from lndlibs import rpc_pb2_grpc as rpcstub
+
+sys.path.append('/home/admin/raspiblitz/home.admin/BlitzPy/blitzpy')
+from config import RaspiBlitzConfig
+from exceptions import BlitzError
+
+from lndlibs import lightning_pb2 as lnrpc
+from lndlibs import lightning_pb2_grpc as rpcstub
 
 #####################
 # SCRIPT INFO
@@ -39,12 +43,13 @@ SERVICE_LND_REST_API = "LND-REST-API"
 SERVICE_LND_GRPC_API = "LND-GRPC-API"
 SERVICE_LNBITS = "LNBITS"
 SERVICE_BTCPAY = "BTCPAY"
+SERVICE_SPHINX = "SPHINX"
 
 #####################
 # BASIC SETTINGS
 #####################
 session = requests.session()
-if Path("/mnt/hdd/raspiblitz.conf").is_file():
+if Path("/mnt/hdd/app-data/raspiblitz.conf").is_file():
     cfg = RaspiBlitzConfig()
     cfg.reload()
 
@@ -146,6 +151,9 @@ def apiGetHosts(session, shopurl):
         response = session.get(url)
     except Exception as e:
         raise BlitzError("failed HTTP request", {'url': url}, e)
+    if response.status_code == 404:
+        raise BlitzError("failed HTTP code, cancel the old tor bridge subscription and create a new one",
+                         {'status_code': response.status_code})
     if response.status_code != 200:
         raise BlitzError("failed HTTP code", {'status_code': response.status_code})
 
@@ -336,6 +344,7 @@ def lndPayInvoice(lnInvoiceString):
         stub = rpcstub.LightningStub(channel)
         request = lnrpc.SendRequest(
             payment_request=lnInvoiceString,
+            fee_limit=lnrpc.FeeLimit(fixed=1000),
         )
         response = stub.SendPaymentSync(request, metadata=[('macaroon', macaroon)])
 
@@ -360,7 +369,7 @@ def shopList(shopUrl):
 
 
 def shopOrder(shopUrl, hostid, servicename, torTarget, duration, msatsFirst, msatsNext, description=""):
-    print("#### Placeing order ...")
+    print("#### Placing order ...")
     shopUrl = normalizeShopUrl(shopUrl)
     orderid = apiPlaceOrderNew(session, shopUrl, hostid, torTarget)
 
@@ -394,7 +403,7 @@ def shopOrder(shopUrl, hostid, servicename, torTarget, duration, msatsFirst, msa
         raise BlitzError("invoice bigger amount than advertised",
                          "advertised({0}) invoice({1})".format(msatsFirst, paymentRequestDecoded.num_msat))
 
-    print("#### Paying invoice ...")
+    print("#### Paying invoice (initial subscription) ...")
     payedInvoice = lndPayInvoice(paymentRequestStr)
     print('# OK PAYMENT SENT')
 
@@ -419,6 +428,8 @@ def shopOrder(shopUrl, hostid, servicename, torTarget, duration, msatsFirst, msa
         raise BlitzError("invalid port (key not found)", bridge)
     except ValueError:
         raise BlitzError("invalid port (not a number)", bridge)
+    if bridge_port < 1 or bridge_port > 65535:
+        raise BlitzError("invalid port (not a valid tcp port)", bridge)
 
     print("#### Check if duration delivered is as advertised ...")
     contract_breached = False
@@ -513,7 +524,7 @@ def subscriptionExtend(shopUrl, bridgeid, durationAdvertised, msatsNext, bridge_
         raise BlitzError("invoice bigger amount than advertised",
                          "advertised({0}) invoice({1})".format(msatsNext, paymentRequestDecoded.num_msat))
 
-    print("#### Paying invoice ...")
+    print("#### Paying invoice (extend subscription) ...")
     payedInvoice = lndPayInvoice(paymentRequestStr)
 
     print("#### Check if bridge was extended ...")
@@ -585,38 +596,87 @@ def menuMakeSubscription(blitzServiceName, torAddress, torPort):
     torTarget = "{0}:{1}".format(torAddress, torPort)
 
     ############################
-    # PHASE 1: Enter Shop URL
+    # PHASE 1: Choose Shop URL
 
-    # see if user had before entered another shop of preference
-    shopurl = DEFAULT_SHOPURL
-    try:
-        subscriptions = toml.load(SUBSCRIPTIONS_FILE)
-        shopurl = subscriptions['shop_ip2tor']
-        print("# using last shop url set in subscriptions.toml")
-    except Exception as e:
-        print("# using default shop url")
-
+    shopurl = ""
     while True:
 
-        # input shop url
+        # see if user had before entered another shop of preference
+        lastusedShop = ""
+        try:
+            subscriptions = toml.load(SUBSCRIPTIONS_FILE)
+            lastusedShop = subscriptions['shop_ip2tor']
+            print("# using last shop url set in subscriptions.toml")
+        except Exception as e:
+            print("# using default shop url")
+
+        # set choices of shops
+        choices = []
+
+        # remove https:// from shop url (to keep it short)
+        if lastusedShop.find("://") > 0: lastusedShop = lastusedShop[lastusedShop.find("://") + 3:]
+
+        # IP2TOR.COM Shop
+        choice_url_ip2torcom="ip2tor.com"
+        choices.append(("A", "ip2tor.com Shop"))
+        if lastusedShop == choice_url_ip2torcom: lastusedShop="" 
+
+        # FULMO Shop
+        #choice_url_fulmo="fulmo7x6yvgz6zs2b2ptduvzwevxmizhq23klkenslt5drxx2physlqd.onion"
+        #choices.append(("B", "Fulmo Shop"))
+        #if lastusedShop == choice_url_fulmo: lastusedShop="" 
+
+        # add before option if different from static options
+        if len(lastusedShop) > 0: choices.append(("Y", lastusedShop))
+    
+        # enter own shop address option
+        choices.append(("X", "Enter a new Shop URL"))
+
+        # show a dialog info box
         d = Dialog(dialog="dialog", autowidgetsize=True)
-        d.set_background_title("Select IP2TOR Bridge Shop (communication secured thru TOR)")
-        code, text = d.inputbox(
-            "Enter Address of a IP2TOR Shop (OR USE DEFAULT):",
-            height=10, width=60, init=shopurl,
-            title="Shop Address")
+        d.set_background_title("IP2TOR - Select Shop")
+        d.msgbox('''
+At the moment there are no public IP2TOR services to link to.
+You could run one yourself - please check the GitHub repo:
+https://github.com/raulcano/docker-ip2tor-shop''', height=10, width=72)
+
+        # select dialog
+        #d = Dialog(dialog="dialog", autowidgetsize=True)
+        #d.set_background_title("IP2TOR - Select Shop")
+        #code, selected = d.menu(
+        #    "\nChoose your IP2Tor provider/shop:",
+        #    choices=choices, width=75, height=10, title="Select IP2Tor Shop")
 
         # if user canceled
+        #if code != d.OK:
+        #    sys.exit(0)
+
+        #if selected == "A" : shopurl=choice_url_ip2torcom
+        #if selected == "B" : shopurl=choice_url_fulmo
+        #if selected == "Y" : shopurl=lastusedShop
+
+        # input shop url
+        #if selected == "X":
+        d = Dialog(dialog="dialog", autowidgetsize=True)
+        d.set_background_title("IP2TOR - Add new Shop")
+        code, shopurl = d.inputbox(
+            "Enter Address of the IP2TOR Shop (OR JUST PRESS OK):",
+            height=10, width=72, init=shopurl,
+            title="Shop Address")
+        if shopurl.find("://") > 0: shopurl = shopurl[shopurl.find("://") + 3:]
+
+        # if user choose cancel
         if code != d.OK:
             sys.exit(0)
 
-        # get host list from shop
-        shopurl = text
+        # try & get host list from shop
         os.system('clear')
         try:
             hosts = shopList(shopurl)
         except Exception as e:
             # shopurl not working
+            eprint(e)
+            time.sleep(3)
             Dialog(dialog="dialog", autowidgetsize=True).msgbox('''
 Cannot reach a shop under that address.
 Please check domain or cancel dialog.
@@ -670,6 +730,9 @@ Try again later, enter another address or cancel.
         if len(host['terms_of_service']) == 0: host['terms_of_service'] = "-"
         if len(host['terms_of_service_url']) == 0: host['terms_of_service_url'] = "-"
 
+        description=host['terms_of_service']
+        if "description" in host: description = "{0} / {1}".format(host['description'], host['terms_of_service'])
+
         # show details of selected
         d = Dialog(dialog="dialog", autowidgetsize=True)
         d.set_background_title("IP2TOR Bridge Offer Details: {0}".format(shopurl))
@@ -688,7 +751,7 @@ the "SUBSCRIPTONS" menu on your RaspiBlitz.
 There will be no refunds for not used hours.
 There is no guarantee for quality of service.
 
-The service has the following additional terms:
+The service has the following additional description & terms:
 {5}
 
 More information on the service you can find under:
@@ -699,7 +762,7 @@ More information on the service you can find under:
             host['tor_bridge_price_extension_sats'],
             host['ip'],
             torTarget,
-            host['terms_of_service'],
+            description,
             host['terms_of_service_url'],
             blitzServiceName
         )
@@ -752,6 +815,7 @@ Message: {1}
 You DID NOT PAY the initial fee.
 The service was not able to provide service.
 Subscription will be ignored.
+Maybe see service description & open a direct channel.         
 
 Error: {0}
 Message: {1}
@@ -794,8 +858,8 @@ Message: {1}
     # if LND REST or LND GRPC service ... add bridge IP to TLS
     if blitzServiceName == SERVICE_LND_REST_API or blitzServiceName == SERVICE_LND_GRPC_API:
         os.system("sudo /home/admin/config.scripts/lnd.tlscert.sh ip-add {0}".format(subscription['ip']))
-        os.system("sudo /home/admin/config.scripts/lnd.credentials.sh reset tls")
-        os.system("sudo /home/admin/config.scripts/lnd.credentials.sh sync")
+        os.system("sudo /home/admin/config.scripts/lnd.credentials.sh reset mainnet tls")
+        os.system("sudo /home/admin/config.scripts/lnd.credentials.sh sync mainnet")
 
     # warn user if not delivered as advertised
     if subscription['contract_breached']:
@@ -1063,10 +1127,10 @@ def subscription_by_service():
 
     try:
         if os.path.isfile(SUBSCRIPTIONS_FILE):
-            os.system("sudo chown admin:admin {0}".format(SUBSCRIPTIONS_FILE))
             subs = toml.load(SUBSCRIPTIONS_FILE)
             for idx, sub in enumerate(subs['subscriptions_ip2tor']):
                 if sub['active'] and sub['name'] == service_name:
+                    print("id='{0}'".format(sub['id']))
                     print("type='{0}'".format(sub['type']))
                     print("ip='{0}'".format(sub['ip']))
                     print("port='{0}'".format(sub['port']))
@@ -1097,7 +1161,6 @@ def ip_by_tor():
 
     try:
         if os.path.isfile(SUBSCRIPTIONS_FILE):
-            os.system("sudo chown admin:admin {0}".format(SUBSCRIPTIONS_FILE))
             subs = toml.load(SUBSCRIPTIONS_FILE)
             for idx, sub in enumerate(subs['subscriptions_ip2tor']):
                 if sub['active'] and (sub['tor'] == onion or sub['tor'].split(":")[0] == onion):

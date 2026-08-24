@@ -1,11 +1,10 @@
 #!/bin/bash
 # see issue: https://github.com/rootzoll/raspiblitz/issues/646
 # and issue: https://github.com/rootzoll/raspiblitz/issues/809
-# to work it needs to be based on Raspbian Desktop base image
 # to check debug logs: sudo cat /home/pi/.cache/lxsession/LXDE-pi/run.log
 
 source /home/admin/raspiblitz.info
-source /mnt/hdd/raspiblitz.conf
+source /mnt/hdd/app-data/raspiblitz.conf
 
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
@@ -21,12 +20,24 @@ fi
 
 if [ "$1" = "1" ] || [ "$1" = "on" ]; then
 
-  echo "Turn ON: Touchscreen"
+  echo "# Turn ON: Touchscreen"
+
+  # check that display class is `lcd`
+  if [ "${displayClass}" != "lcd" ]; then
+    echo "# displayClass(${displayClass}) is not supported for touchscreen"
+    echo "error='not supported'"
+    exit 1
+  fi
+
+  echo "# make sure hdmi_force_hotplug is deactivated"
+  sudo sed -i '/^hdmi_force_hotplug=/d' /boot/firmware/config.txt 2>/dev/null
 
   # update install sources
   echo "making sure system dependencies are installed"
   sudo apt-get update >/dev/null
   sudo apt-get install -y unclutter xterm python3-pyqt5 >/dev/null
+  sudo apt-get install -y xfonts-terminus >/dev/null
+  sudo apt-get install -y xinput-calibrator 
 
   # check if python3 env exists - if not install it
   if [ ! -d /home/admin/python3-env-lnd ]; then
@@ -39,12 +50,12 @@ if [ "$1" = "1" ] || [ "$1" = "on" ]; then
   /home/admin/python3-env-lnd/bin/pip install /home/admin/raspiblitz/home.admin/BlitzTUI/ 
 
   # make sure lndlibs are patched for compatibility for both Python2 and Python3
-  if ! grep -Fxq "from __future__ import absolute_import" /home/admin/config.scripts/lndlibs/rpc_pb2_grpc.py; then
-    sed -i -E '1 a from __future__ import absolute_import' /home/admin/config.scripts/lndlibs/rpc_pb2_grpc.py
+  if ! grep -Fxq "from __future__ import absolute_import" /home/admin/config.scripts/lndlibs/lightning_pb2_grpc.py; then
+    sed -i -E '1 a from __future__ import absolute_import' /home/admin/config.scripts/lndlibs/lightning_pb2_grpc.py
   fi
 
-  if ! grep -Eq "^from . import.*" /home/admin/config.scripts/lndlibs/rpc_pb2_grpc.py; then
-    sed -i -E 's/^(import.*_pb2)/from . \1/' /home/admin/config.scripts/lndlibs/rpc_pb2_grpc.py
+  if ! grep -Eq "^from . import.*" /home/admin/config.scripts/lndlibs/lightning_pb2_grpc.py; then
+    sed -i -E 's/^(import.*_pb2)/from . \1/' /home/admin/config.scripts/lndlibs/lightning_pb2_grpc.py
   fi
 
   # switch to desktop login
@@ -124,11 +135,7 @@ EOF
     echo "LCD is rotated into default - no touchscreen rotate"
   fi
 
-  # mark touchscreen as switched ON in config
-  if [ ${#touchscreen} -eq 0 ]; then
-    echo "touchscreen=0" >> /mnt/hdd/raspiblitz.conf
-  fi
-  sudo sed -i 's/^touchscreen=.*/touchscreen=1/g' /mnt/hdd/raspiblitz.conf
+  /home/admin/config.scripts/blitz.conf.sh set touchscreen "1"
 
   echo "OK - a restart is needed: sudo shutdown -r now"
   exit 0
@@ -154,8 +161,8 @@ if [ "$1" = "calibrate" ]; then
   # check that touchscreen is on
   if [ "${touchscreen}" == "1" ]; then
     echo "# calibrating touchscreen ..."
-    echo "error='not installed'"
   else
+    echo "error='not installed'"
     exit 1
   fi
 
@@ -199,6 +206,10 @@ if [ "$1" = "0" ] || [ "$1" = "off" ]; then
   echo "switching back to console mode on boot"
   sudo raspi-config nonint do_boot_behaviour B2 >/dev/null 2>&1
 
+  # make sure hdmi_force_hotplug=1 is added again to config.txt
+  sudo sed -i '/^hdmi_force_hotplug=/d' /boot/firmware/config.txt 2>/dev/null
+  #echo "hdmi_force_hotplug=1" >> /boot/firmware/config.txt
+
   # set user pi user for autostart
   # TODO(frennkie/rootzoll) what should happen here? This does the same as "on".
   sudo sed -i 's/--autologin root/--autologin pi/' /etc/systemd/system/getty@tty1.service.d/autologin.conf
@@ -220,7 +231,7 @@ if [ "$1" = "0" ] || [ "$1" = "off" ]; then
   sudo rm -f /etc/X11/xorg.conf.d/40-libinput.conf >/dev/null
 
   # mark touchscreen as switched OFF in config
-  sudo sed -i 's/^touchscreen=.*/touchscreen=0/g' /mnt/hdd/raspiblitz.conf
+  /home/admin/config.scripts/blitz.conf.sh set touchscreen "0"
 
   echo "OK - a restart is needed: sudo shutdown -r now"
   exit 0

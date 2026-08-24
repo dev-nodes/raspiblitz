@@ -39,8 +39,8 @@ IS_WIN32_ENV = sys.platform == "win32"
 
 SCREEN_HEIGHT = 318
 
-LND_CONF = "/mnt/hdd/lnd/lnd.conf"
-RB_CONF = "/mnt/hdd/raspiblitz.conf"
+LND_CONF = "/mnt/hdd/app-data/lnd/lnd.conf"
+RB_CONF = "/mnt/hdd/app-data/raspiblitz.conf"
 RB_INFO = "/home/admin/raspiblitz.info"
 
 STATUS_INTERVAL_LND = 30
@@ -137,7 +137,7 @@ class AppWindow(QMainWindow):
         self.file_watcher.signal.connect(self.update_watched_attr)
         self.file_watcher.start()
 
-        # finally start 00infoBlitz.sh in dedicated xterm frame
+        # finally start 00infoBlitz.sh in dedicated uxterm frame
         self.start_info_lcd()
 
         self.show()
@@ -154,7 +154,9 @@ class AppWindow(QMainWindow):
         process.readyReadStandardOutput.connect(
             lambda: log.info(str(process.readAllStandardOutput().data().decode('utf-8'))))
 
-        process.start('xterm', ['-fn', 'fixed', '-into', str(int(self.ui.widget.winId())),
+        # test by connecting to the raspiblitz 'ssh -X admin@LAN_IP' and run:
+        # uxterm -fa Terminus -fs 9 -fn fixed +sb -hold -e 'bash -c "sudo -u pi /home/admin/00infoLCD.sh --pause 0"'
+        process.start('uxterm', ['-fa', 'Terminus', '-fs', '9', '-fn', 'fixed', '-into', str(int(self.ui.widget.winId())),
                                 '+sb', '-hold', '-e', 'bash -c \"/home/admin/00infoLCD.sh --pause {}\"'.format(pause)])
 
     def check_config(self):
@@ -521,8 +523,8 @@ class AppWindow(QMainWindow):
             return
 
         process = QProcess(self)
-        process.start('xterm', ['-fn', 'fixed', '-into', str(int(self.ui.widget.winId())),
-                                '+sb', '-hold', '-e', 'bash -c \"sudo /home/admin/XXshutdown.sh\"'])
+        process.start('uxterm', ['-fa', 'Terminus', '-fs', '9', '-fn', 'fixed', '-into', str(int(self.ui.widget.winId())),
+                                '+sb', '-hold', '-e', 'bash -c \"sudo /home/admin/config.scripts/blitz.shutdown.sh\"'])
 
     def b4_restart(self):
         log.info("restart")
@@ -531,8 +533,8 @@ class AppWindow(QMainWindow):
             return
 
         process = QProcess(self)
-        process.start('xterm', ['-fn', 'fixed', '-into', str(int(self.ui.widget.winId())),
-                                '+sb', '-hold', '-e', 'bash -c \"sudo /home/admin/XXshutdown.sh reboot\"'])
+        process.start('uxterm', ['-fa', 'Terminus', '-fs', '9', '-fn', 'fixed', '-into', str(int(self.ui.widget.winId())),
+                                '+sb', '-hold', '-e', 'bash -c \"sudo /home/admin/config.scripts/blitz.shutdown.sh reboot\"'])
 
     def create_new_invoice(self, memo="Pay to RaspiBlitz", amt=0):
         if IS_DEV_ENV:

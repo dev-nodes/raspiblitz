@@ -10,10 +10,8 @@ fi
 
 # check parameter
 if [ "${1}" != "log" ]; then
-  echo "# FAIL: unkown parameter"
+  echo "# FAIL: unknown parameter"
 fi
 
-# writing log file entry
-logFile="/home/admin/systemd.${2}.log"
-echo "$(date +%s) ${3}" >> ${logFile}
-echo "# OK: log '${3}' written to ${logFile}"
+# count for statistics in cache
+/home/admin/_cache.sh increment system_count_start_${2}

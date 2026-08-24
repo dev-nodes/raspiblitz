@@ -1,390 +1,351 @@
 #!/bin/bash
-echo "Starting the main menu ..."
+
+#######################################
+# SSH USER INTERFACE
+# gets called when user logins per SSH
+# or calls 'raspiblitz' on the terminal
+#######################################
+echo "Starting SSH user interface ... (please wait)"
 
 # CONFIGFILE - configuration of RaspiBlitz
-configFile="/mnt/hdd/raspiblitz.conf"
+source /mnt/hdd/app-data/raspiblitz.conf 2>/dev/null
 
 # INFOFILE - state data from bootstrap
 infoFile="/home/admin/raspiblitz.info"
-
-# use blitz.datadrive.sh to analyse HDD situation
-source <(sudo /home/admin/config.scripts/blitz.datadrive.sh status)
-if [ ${#error} -gt 0 ]; then
-  echo "# FAIL blitz.datadrive.sh status --> ${error}"
-  echo "# Please report issue to the raspiblitz github."
-  exit 1
-fi
-
-# check if HDD is connected
-if [ ${isMounted} -eq 0 ] && [ ${#hddCandidate} -eq 0 ]; then
-    echo "***********************************************************"
-    echo "WARNING: NO HDD FOUND -> Shutdown, connect HDD and restart."
-    echo "***********************************************************"
-    exit
-fi
-
-# check data from _bootstrap.sh that was running on device setup
-bootstrapInfoExists=$(ls $infoFile | grep -c '.info')
-if [ ${bootstrapInfoExists} -eq 0 ]; then
-  echo "***********************************************************"
-  echo "WARNING: NO raspiblitz.info FOUND -> bootstrap not running?"
-  echo "***********************************************************"
-  exit
-fi
-
-# load the data from the info file (will get produced on every startup)
 source ${infoFile}
 
-if [ "${state}" = "recovering" ]; then
-  echo "***********************************************************"
-  echo "WARNING: bootstrap still updating - close SSH, login later"
-  echo "To monitor progress --> tail -n1000 -f raspiblitz.log"
-  echo "***********************************************************"
-  exit
-fi
-
-# signal that after bootstrap recover user dialog is needed
-recoveredInfoExists=$(sudo ls /home/admin/raspiblitz.recover.info 2>/dev/null | grep -c '.info')
-if [ ${recoveredInfoExists} -gt 0 ]; then
-  echo "System recovered - needs final user settings"
-  /home/admin/20recoverDialog.sh 
+# check that basic system phase/state information is available
+if [ -z "${setupPhase}" ] || [ -z "${state}" ]; then
+  echo "setupPhase(${setupPhase}) state(${state})"
+  echo "FAIL: ${infoFile} does not exist or missing state."
+  echo "Check logs & bootstrap.service for errors and report to devs."
   exit 1
 fi
 
-# signal that a reindex was triggered
-if [ "${state}" = "reindex" ]; then
-  echo "Re-Index in progress ... start monitoring:"
-  /home/admin/config.scripts/network.reindex.sh
-  exit 1
-fi
-
-# singal that copstation is running
-if [ "${state}" = "copystation" ]; then
-  echo "Copy Station is Runnning ..."
-  echo "reboot to return to normal"
-  sudo /home/admin/XXcopyStation.sh
-  exit
-fi
-
-# if state=ready -> setup is done or started
-if [ "${state}" = "ready" ]; then
-  configExists=$(ls ${configFile} | grep -c '.conf')
-  if [ ${configExists} -eq 1 ]; then
-    echo "loading config data"
-    source ${configFile}
-  else
-    echo "setup still in progress - setupStep(${setupStep})"
+# special state: copysource
+if [ "${state}" = "stop" ]; then
+  echo "***********************************************************"
+  echo "Stop signal detected - OK ready for manual provision."
+  echo "If your ready for shutdown use the following command:"
+  echo "release --> for an official release"
+  echo "release -quick --> during development"
+  if [ "${vm}" = "1" ]; then
+    echo "REMOVE AUDIO DEVICE from VM before next boot up."
   fi
+  echo "***********************************************************"
+  exit
+# special state: copysource
+elif [ "${state}" = "copysource" ]; then
+  echo "***********************************************************"
+  echo "INFO: You lost connection during copying the blockchain"
+  echo "You have the following options:"
+  echo "a) continue/check progress with command: sourcemode"
+  echo "b) return to normal mode with command: restart"
+  echo "***********************************************************"
+  exit
 fi
 
-## default menu settings
-# to fit the main menu without scrolling: 
-HEIGHT=13
-WIDTH=64
-CHOICE_HEIGHT=6
-BACKTITLE="RaspiBlitz"
-TITLE=""
-MENU="Choose one of the following options:"
-OPTIONS=()
+# special state: copytarget
+source <(/home/admin/config.scripts/blitz.copychain.sh status)
+if [ "${copyInProgress}" = "1" ]; then
+  echo "Detected interrupted COPY blockchain process ..."
+  /home/admin/config.scripts/blitz.copychain.sh target
+  exit
+fi
 
-# check if RTL web interface is installed
-runningRTL=$(sudo ls /etc/systemd/system/RTL.service 2>/dev/null | grep -c 'RTL.service')
+#####################################
+# SSH MENU LOOP
+# this loop runs until user exits or
+# an error drops user to terminal
+#####################################
 
-# function to use later
-waitUntilChainNetworkIsReady()
-{
-    source ${configFile}
-    echo "checking ${network}d - please wait .."
-    echo "can take longer if device was off or first time"
-    while :
-    do
-      
-      # check for error on network
-      sudo -u bitcoin ${network}-cli -datadir=/home/bitcoin/.${network} getblockchaininfo 1>/dev/null 2>error.tmp
-      clienterror=`cat error.tmp`
-      rm error.tmp
-
-      # check for missing blockchain data
-      if [ "${network}" = "bitcoin" ]; then
-        if [ "${chain}" = "main" ]; then
-          minSize=210000000000
-        else
-          minSize=27000000000
-        fi
-      elif [ "${network}" = "litecoin" ]; then
-        if [ "${chain}" = "main" ]; then
-          minSize=20000000000
-        else
-          minSize=27000000000
-        fi
-      else
-        minSize=210000000000000
-      fi
-      isSyncing=$(sudo ls -la /mnt/hdd/${network}/blocks/.selfsync 2>/dev/null | grep -c '.selfsync')
-      blockchainsize=$(sudo du -shbc /mnt/hdd/${network}/ 2>/dev/null | head -n1 | awk '{print $1;}')
-      if [ ${#blockchainsize} -gt 0 ]; then
-        if [ ${blockchainsize} -lt ${minSize} ]; then
-          if [ ${isSyncing} -eq 0 ]; then
-            echo "blockchainsize(${blockchainsize})"
-            echo "Missing Blockchain Data (<${minSize}) ..."
-            clienterror="missing blockchain"
-            sleep 3
-          fi
-        fi
-      fi
-
-      if [ ${#clienterror} -gt 0 ]; then
-        #echo "clienterror(${clienterror})"
-
-        # analyse LOGS for possible reindex
-        reindex=$(sudo cat /mnt/hdd/${network}/debug.log 2>/dev/null | grep -c 'Please restart with -reindex or -reindex-chainstate to recover')
-        if [ ${reindex} -gt 0 ]; then
-          # dismiss if its just a date thing
-          futureBlock=$(sudo tail /mnt/hdd/${network}/debug.log 2>/dev/null | grep "Please restart with -reindex or -reindex-chainstate to recover" | grep -c "block database contains a block which appears to be from the future")
-          if [ ${futureBlock} -gt 0 ]; then
-            blockchainBroken=0
-            echo "-> Ignore reindex - its just a future block"
-          fi
-          if [ ${isSyncing} -gt 0 ]; then
-            reindex=0
-          fi
-        fi
-        if [ ${reindex} -gt 0 ] || [ "${clienterror}" = "missing blockchain" ]; then
-    
-          echo "!! DETECTED NEED FOR RE-INDEX in debug.log ... starting repair options."          
-          sudo sed -i "s/^state=.*/state=repair/g" /home/admin/raspiblitz.info
-          sleep 3
-
-          whiptail --title "RaspiBlitz - Repair Script" --yes-button "DELETE+REPAIR" --no-button "Ignore" --yesno "Your blockchain data needs to be repaired.
-This can be due to power problems or a failing HDD.
-For more info see: https://raspiblitz.org -> FAQ
-
-Before RaspiBlitz can offer you repair options the old
-corrupted blockchain needs to be deleted while your LND
-funds and channel stay safe (just expect some off-time).
-
-How do you want to continue?
-" 13 65
-          if [ $? -eq 0 ]; then
-            #delete+repair
-            clear
-            /home/admin/XXcleanHDD.sh -blockchain -force
-            /home/admin/98repairBlockchain.sh
-            /home/admin/00raspiblitz.sh
-            exit
-          else
-            # ignore - just delete blockchain logfile
-            clear
-          fi
-
-        fi
-
-        # let 80scanLND script to the info to use
-        /home/admin/80scanLND.sh
-        if [ $? -gt 0 ]; then
-          echo "${network} error: ${clienterror}"
-          exit 0
-        fi
-
-      else
-        locked=$(sudo -u bitcoin /usr/local/bin/lncli --chain=${network} --network=${chain}net getinfo 2>&1 | grep -c unlock)
-        if [ ${locked} -gt 0 ]; then
-          uptime=$(awk '{printf("%d\n",$1 + 0.5)}' /proc/uptime)
-          if [ "${autoUnlock}" == "on" ] && [ ${uptime} -lt 300 ]; then
-            # give autounlock 5 min after startup to react
-            sleep 1
-          else
-            # check how many times LND was restarted
-            source <(sudo /home/admin/config.scripts/blitz.statusscan.sh)
-            if [ ${startcountLightning} -lt 4 ]; then
-              /home/admin/config.scripts/lnd.unlock.sh
-              echo "Starting up Wallet ... (10sec)"
-              sleep 5
-              sleep 5
-              echo "please wait ... update to next screen can be slow"
-            else
-              /home/admin/80scanLND.sh lightning-error
-              echo "(exit after too much restarts/unlocks - restart to try again)"
-              exit 0
-            fi
-          fi
-        fi
-        lndSynced=$(sudo -u bitcoin /usr/local/bin/lncli --chain=${network} --network=${chain}net getinfo 2>/dev/null | jq -r '.synced_to_chain' | grep -c true)
-        if [ ${lndSynced} -eq 0 ]; then
-          /home/admin/80scanLND.sh
-          if [ $? -gt 0 ]; then
-            exit 0
-          fi
-        else
-          # everything is ready - return from loop
-          return
-        fi
-      fi
-      sleep 5
-    done
+# listen to CTRL-c & CTRL-z to break loop
+quit() {
+  echo "SIGINT or SIGTERM received, exiting..."
+  kill -9 $$
 }
+trap quit INT TERM
 
-if [ ${#setupStep} -eq 0 ]; then
-  echo "WARN: no setup step found in raspiblitz.info"
-  setupStep=0
-fi
-if [ ${setupStep} -eq 0 ]; then
+echo "# start ssh menu loop"
+# put some values on higher scan rate for 10 minute
+for key in ln_default_ready ln_default_locked btc_default_synced; do
+  /home/admin/_cache.sh focus $key 2 600 >/dev/null
+done
 
-  # check data from boostrap
-  # TODO: when olddata --> CLEAN OR MANUAL-UPDATE-INFO
-  if [ "${state}" = "olddata" ]; then
+echo "# starting ssh menu loop ... "
+exitMenuLoop=0
+doneIBD=0
+while [ ${exitMenuLoop} -eq 0 ]; do
+  #####################################
+  # Access fresh system info on every loop
 
-    # old data setup
-    BACKTITLE="RaspiBlitz - Manual Update"
-    TITLE="⚡ Found old RaspiBlitz Data on HDD ⚡"
-    MENU="\n         ATTENTION: OLD DATA COULD CONTAIN FUNDS\n"
-    OPTIONS+=(MANUAL "read how to recover your old funds")
-    HEIGHT=11
+  # refresh system state information
+  source <(/home/admin/_cache.sh get \
+    systemscan_runtime state setupPhase btc_default_synced \
+    ln_default_sync_chain ln_default_locked ln_default_ready \
+    ln_default_sync_initial_done message network chain \
+    lightning internet_localip)
 
-  else
-    isRaspbian=$(cat /etc/os-release 2>/dev/null | grep -c 'Raspbian')
-    if [ ${isRaspbian} -gt 0 ]; then
-      # show hardware test
-      /home/admin/05hardwareTest.sh
+  # background.scan is not ready yet
+  if [ -z "${systemscan_runtime}" ]; then
+    echo "# background.scan not ready yet ... (please wait)"
+    sleep 4
+    continue
+  fi
 
-      # start setup
-      BACKTITLE="RaspiBlitz - Setup"
-      TITLE="⚡ Welcome to your RaspiBlitz ⚡"
-      MENU="\nChoose how you want to setup your RaspiBlitz: \n "
-      OPTIONS+=(BITCOIN "Setup BITCOIN and Lightning (DEFAULT)" \
-                LITECOIN "Setup LITECOIN and Lightning (EXPERIMENTAL)" \
-                MIGRATION "Upload a Migration File from old RaspiBlitz" )
-      HEIGHT=12
-    else
-      # start setup
-      BACKTITLE="RaspiBlitz - Setup"
-      TITLE="⚡ Welcome to your RaspiBlitz ⚡"
-      MENU="\nStart to setup your RaspiBlitz: \n "
-      OPTIONS+=(BITCOIN "Setup BITCOIN and Lightning" \
-                MIGRATION "Upload a Migration File from old RaspiBlitz")
-      HEIGHT=11
+  #####################################
+  # ALWAYS: Handle System States
+  #####################################
+
+  ############################
+  # Wallet Unlock
+
+  if [ "${state}" == "ready" ] && [ "${setupPhase}" == "done" ] && [ "${ln_default_locked}" == "1" ]; then
+    # unlock lnd
+    if [ "${lightning}" == "lnd" ]; then
+      /home/admin/config.scripts/lnd.unlock.sh
+    # unlock c-lightning
+    elif [ "${lightning}" == "cl" ]; then
+      /home/admin/config.scripts/cl.hsmtool.sh unlock ${chain}net
+      sleep 5
     fi
   fi
 
-elif [ ${setupStep} -lt 100 ]; then
+  #####################################
+  # SETUP MENU
+  #####################################
 
-    # continue setup
-    BACKTITLE="${hostname} / ${network} / ${chain}"
-    TITLE="⚡ Welcome to your RaspiBlitz ⚡"
-    MENU="\nThe setup process is not finished yet: \n "
-    OPTIONS+=(CONTINUE "Continue Setup of your RaspiBlitz")
-    HEIGHT=10
-
-else
-
-  # check if LND needs re-setup
-  source <(sudo /home/admin/config.scripts/lnd.check.sh basic-setup)
-  if [ "${wallet}" == "0" ] || [ "${macaroon}" == "0" ] || [ "${config}" == "0" ] || [ "${tls}" == "0" ]; then
-      echo "WARN: LND needs re-setup"
-      /home/admin/70initLND.sh
-      exit 0
+  # when is needed & bootstrap process signals that it waits for user dialog
+  if [ "${setupPhase}" != "done" ] && [ "${state}" == "waitsetup" ]; then
+    # push user to main menu
+    echo "# controlSetupDialog.sh"
+    /home/admin/setup.scripts/controlSetupDialog.sh 
+    # use the exit code from setup menu as signal if menu loop should exited
+    # 0 = continue loop / everything else = break loop and exit to terminal
+    exitMenuLoop=$?
+    if [ "${exitMenuLoop}" != "0" ]; then break; fi
   fi
 
-  # wait all is synced and ready
-  waitUntilChainNetworkIsReady
+  #######################################
+  # 2nd SETUP MENU (after HDD/SSD format)
+  #######################################
 
-  # check if there is a channel.backup to activate
-  gotSCB=$(ls /home/admin/channel.backup 2>/dev/null | grep -c 'channel.backup')
-  if [ ${gotSCB} -eq 1 ]; then
+  # when is needed & bootstrap process signals that it waits for user dialog
+  if [ "${setupPhase}" != "done" ] && [ "${state}" == "waitsetup-extended" ]; then
+    # push user to main menu
+    echo "# controlSetupExtendedDialog.sh"
+    /home/admin/setup.scripts/controlSetupExtendedDialog.sh 
+    # use the exit code from setup menu as signal if menu loop should exited
+    # 0 = continue loop / everything else = break loop and exit to terminal
+    exitMenuLoop=$?
+    if [ "${exitMenuLoop}" != "0" ]; then break; fi
+  fi
 
-    echo "*** channel.backup Recovery ***"
-    lncli --chain=${network} restorechanbackup --multi_file=/home/admin/channel.backup 2>/home/admin/.error.tmp
-    error=`cat /home/admin/.error.tmp`
-    rm /home/admin/.error.tmp 2>/dev/null
+  #####################################
+  # SETUP DONE DIALOGS
+  #####################################
 
-    if [ ${#error} -gt 0 ]; then
+  # when is needed & bootstrap process signals that it waits for user dialog
+  if [ "${setupPhase}" != "done" ] && [ "${state}" == "waitfinal" ]; then
+    # push to final setup gui dialogs
+    #echo "# controlFinalDialog.sh"
+    /home/admin/setup.scripts/controlFinalDialog.sh
+    # exit because controller will reboot at the end
+    exit 0
+  fi
 
-      # output error message
-      echo ""
-      echo "!!! FAIL !!! SOMETHING WENT WRONG:"
-      echo "${error}"
+  # exit loop/script in case if system shutting down
+  if [ "${state}" == "reboot" ] || [ "${state}" == "shutdown" ]; then
+    dialog --pause "  Prepare ${state} ..." 8 58 4
+    clear
+    echo "***********************************************************"
+    echo "RaspiBlitz going to ${state}"
+    echo "***********************************************************"
+    if [ "${state}" == "reboot" ]; then
+      echo "SSH again into system with:"
+      echo "ssh admin@${internet_localip}"
+      echo "Use your password A"
+      echo "***********************************************************"
+    fi
+    sleep 10
+    exit 0
+  fi
 
-      # check if its possible to give background info on the error
-      notMachtingSeed=$(echo $error | grep -c 'unable to unpack chan backup')
-      if [ ${notMachtingSeed} -gt 0 ]; then
-        echo "--> ERROR BACKGROUND:"
-        echo "The WORD SEED is not matching the channel.backup file."
-        echo "Either there was an error in the word seed list or"
-        echo "or the channel.backup file is from another RaspiBlitz."
-        echo 
-      fi
+  #####################################
+  # MAKE SURE BLOCKCHAIN/LN IS SYNC
+  #####################################
+  if [ "${setupPhase}" == "done" ] && [ "${state}" == "ready" ]; then
+    if [ "${btc_default_synced}" != "1" ] || [ "${ln_default_ready}" == "0" ] || [ "${ln_default_sync_chain}" == "0" ] || [ "${ln_default_sync_initial_done}" == "0" ]; then
+      /home/admin/setup.scripts/eventBlockchainSync.sh ssh
+      sleep 3
+      continue
+    fi
+  fi
 
-      # basic info on error
-      echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-      echo 
-      echo "You can try after full setup to restore channel.backup file again with:"
-      echo "lncli --chain=${network} restorechanbackup --multi_file=/home/admin/channel.backup"
+  #####################################
+  # SCB ACTIVATION
+  #####################################
+
+  # when setup is done & state is ready .. check for SCB activation
+  if [ "${setupPhase}" == "done" ] && [ "${state}" == "ready" ]; then
+
+    # check if there is a channel.backup to activate
+    gotSCB=$(ls /home/admin/channel.backup 2>/dev/null | grep -c 'channel.backup')
+    if [ "${gotSCB}" == "1" ]; then
+      clear
       echo
-      echo "Press ENTER to continue for now ..."
-      read key
-    else
-      mv /home/admin/channel.backup /home/admin/channel.backup.done
-      dialog --title " OK channel.backup IMPORT " --msgbox "
-LND accepted the channel.backup file you uploaded. 
-It will now take around a hour until you can see,
+      echo "*** channel.backup Recovery ***"
+      echo "Running ... (please wait)"
+      lncli --chain=${network} restorechanbackup --multi_file=/home/admin/channel.backup 2>/home/admin/.error.tmp
+      error=$(cat /home/admin/.error.tmp)
+      rm /home/admin/.error.tmp 2>/dev/null
+
+      if [ ${#error} -gt 0 ]; then
+        # output error message
+        echo ""
+        echo "# FAIL # SOMETHING WENT WRONG:"
+        echo "${error}"
+
+        # check if its possible to give background info on the error
+        notMatchingSeed=$(echo $error | grep -c 'unable to unpack chan backup')
+        if [ ${notMatchingSeed} -gt 0 ]; then
+          echo "--> ERROR BACKGROUND:"
+          echo "The WORD SEED is not matching the channel.backup file."
+          echo "Either there was an error in the word seed list or"
+          echo "or the channel.backup file is from another RaspiBlitz."
+          echo
+        fi
+
+        # basic info on error
+        echo "#################"
+        echo "To try upload of channel.backup again:"
+        echo "MAINMENU > REPAIR > REPAIR-LND > RETRYSCB"
+        echo
+        echo "Press ENTER to continue for now ..."
+        rm /home/admin/channel.backup
+        read key
+      else
+        rm /home/admin/channel.backup
+        dialog --title " OK Static-Channel-Backup IMPORT " --msgbox "
+LND accepted the channel.backup file you uploaded.
+It can now take up to an hour until you can see,
 if LND was able to recover funds from your channels.
-     " 9 56
+
+If you dont see any pending on-chain incoming funds
+within the next hour or you still missing funds, you
+can always retry the upload again under:
+MAINMENU > REPAIR > REPAIR-LND > RETRYSCB
+" 14 58
+      fi
     fi
-  
   fi
 
-  #forward to main menu
-  /home/admin/00mainMenu.sh
-  exit 0
+  #####################################
+  # MAIN MENU or BLOCKCHAIN SYNC
+  #####################################
 
+  # when setup is done & state is ready .. jump to main menu
+  if [ "${setupPhase}" == "done" ] && [ "${state}" == "ready" ]; then
+    # MAIN MENU
+    # remove higher scan rate on values
+    for key in ln_default_locked btc_default_synced; do
+      /home/admin/_cache.sh focus $key -1
+    done
+    echo "# 00mainMenu.sh"
+    /home/admin/00mainMenu.sh
+    # use the exit code from main menu as signal if menu loop should exited
+    # 0 = continue loop / everything else = break loop and exit to terminal
+    exitMenuLoop=$?
+    [ "${exitMenuLoop}" != "0" ] && break
+  fi
+
+  #####################################
+  # DURING SETUP: Handle System States
+  #####################################
+
+  if [ "${setupPhase}" != "done" ]; then
+
+    #echo "# DURING SETUP: Handle System State (${state})"
+
+    # for all critical errors (admin info & exit)
+    if [ "${state}" == "error" ] || [ "${state}" == "errorHDD" ]; then
+      clear
+      echo "###########################################################"
+      echo "# /home/admin/raspiblitz.log"
+      cat /home/admin/raspiblitz.log
+      if [ "${state}" == "errorHDD" ]; then
+        # print some debug detail info on HDD/SSD error
+        echo "###########################################################"
+        echo "# blitz.data.sh status"
+        sudo /home/admin/config.scripts/blitz.data.sh status
+      fi
+      if [ "${message}" == "_provision.setup.sh fail" ]; then
+        echo "# /home/admin/raspiblitz.provision-setup.log"
+        cat /home/admin/raspiblitz.provision-setup.log
+      fi
+      echo "***********************************************************"
+      echo "ERROR - please report to development team"
+      echo "***********************************************************"
+      echo "state(${state}) message(${message})"
+      echo "https://github.com/rootzoll/raspiblitz#support"
+      echo "command to shutdown --> off"
+      exit 1
+    elif [ "${state}" == "" ]; then
+      echo "state(${state}) message(${message})"
+    else
+        # every other state just push as event to SSH frontend
+        /home/admin/setup.scripts/eventInfoWait.sh "${state}" "${message}"
+        sleep 1
+    fi
+  fi
+done
+
+echo "# menu loop received exit code ${exitMenuLoop} --> exit to terminal"
+echo
+echo "               -==@@@====@===--       --===@====@@@==-                "
+echo "            -@@=====-----=-===@@=====@@=====-----=====@@-       -==@- "
+echo "            -@@------==---------@@@@@=--------==------@@-  --=@@@@=   "
+echo "             @@=------======-----@@@-----======------=@@=@@===@@=     "
+echo "             =@@=---------=======@@@=======-----===@@@==-  =@@-       "
+echo "          -=@@==@@=----------=@@@@@@@@@=----==@@@==--   -=@@-         "
+echo "        -@@@=----=@@===--====@@@@@@@@@@@@@@@@=--      -=@@@@=         "
+echo "       =@@=--------@@@@@@@@@@@@@@@@@@@@@=--         -@@=---=@@-       "
+echo "     -@@=-------=@@@=====@@@@@@@@@@=--            =@@=-------@@@      "
+echo "    =@@=-------=@@====@@@@@@@@==-              -=@@@@=--------=@@-    "
+echo "   =@@---------@@==@@@@@@==-                 -=@@@=@@@---------=@@    "
+echo "  -@@=--------=@@@@@@=-                    -@@@@@@@@@@=---------=@@   "
+echo "  @@=-------@@@@@@@@@=-                  =@@@===@@@@=@@@@--------@@-  "
+echo " -@@=------@@====@@@=@@@=-            -=@@@======@@====@@@-------=@@  "
+echo " -@@------@@@====@@@====@@@=-         =@@@======@@@=====@@=------=@@  "
+echo " -@@------=@@====@@@@@=====@@@=-        -=@@@=@@@@@@===@@@=------=@@  "
+echo " -@@-------@@@=@@@@@@@@@@@@@@@=-           -=@@@@@@@@=@@@=-------=@@  "
+echo "  @@=-------=@@@@@@@@@@@@@@@=                 -=@@@=@@@@=--------@@=  "
+echo "  -@@--------=@@======@@@@-                    -=@@@@@@=--------=@@   "
+echo "   =@@--------@@@===@@@=-                 --=@@@@@@=@@@--------=@@-   "
+echo "    =@@--------@@@@@@=-               -==@@@@@=====@@@--------=@@-    "
+echo "     =@@=-------@@@=             -==@@@@@@@=====@@@@=--------=@@-     "
+echo "      -@@=----=@@-          -==@@@@@@@@@@@@@@@@@==---------=@@=       "
+echo "        =@@==@@-       -==@@@@@=========@@@@@=-----------=@@@-        "
+echo "         -@@=-    --=@@@==-=@@@@@@@@@@@@@=-------------=@@=-          "
+echo "       -@@=  --=@@@==----------=======-------------==@@@=             "
+echo "     -@@=-==@==-=@@@===------------------------==@@@@=                "
+echo "   =@@@@==-        -==@@@@@======----======@@@@@=--                   "
+echo " =@@=--                 --===@@@@@@@@@@@===--                         "
+echo
+echo "***********************************"
+echo "* RaspiBlitz Commandline"
+echo "* Here be dragons .. have fun :)"
+echo "***********************************"
+if [ "${setupPhase}" == "done" ]; then
+  echo "Bitcoin command line options: ${network}-cli help"
+  [ "${lightning}" == "lnd" ] && echo "LND command line options: lncli -h"
+  [ "${lightning}" == "cl" ] && echo "Core Lightning command line options: lightning-cli help"
+else
+  echo "Your setup is not finished."
+  echo "For setup logs: cat raspiblitz.log"
+  echo "or call the command 'debug' to see bigger report."
 fi
-
-CHOICE=$(dialog --clear \
-                --backtitle "$BACKTITLE" \
-                --title "$TITLE" \
-                --menu "$MENU" \
-                $HEIGHT $WIDTH $CHOICE_HEIGHT \
-                "${OPTIONS[@]}" \
-                2>&1 >/dev/tty)
-
-clear
-case $CHOICE in
-        CLOSE)
-            exit 1;
-            ;;
-        BITCOIN)
-            # set network info
-            sed -i "s/^network=.*/network=bitcoin/g" ${infoFile}
-            sed -i "s/^chain=.*/chain=main/g" ${infoFile}
-            ###### OPTIMIZE IF RAM >1GB
-            kbSizeRAM=$(cat /proc/meminfo | grep "MemTotal" | sed 's/[^0-9]*//g')
-            if [ ${kbSizeRAM} -gt 1500000 ]; then
-              echo "Detected RAM >1GB --> optimizing ${network}.conf"
-              sudo sed -i "s/^dbcache=.*/dbcache=512/g" /home/admin/assets/bitcoin.conf
-              sudo sed -i "s/^maxmempool=.*/maxmempool=300/g" /home/admin/assets/bitcoin.conf
-            fi
-            /home/admin/10setupBlitz.sh
-            exit 1;
-            ;;
-        LITECOIN)
-            /home/admin/config.scripts/blitz.litecoin.sh on
-            /home/admin/10setupBlitz.sh
-            exit 1;
-            ;;
-        MANUAL)
-            echo "************************************************************************************"
-            echo "PLEASE go to RaspiBlitz FAQ:"
-            echo "https://github.com/rootzoll/raspiblitz"
-            echo "And check: How can I recover my coins from a failing RaspiBlitz?"
-            echo "************************************************************************************"
-            exit 0
-            ;; 
-        MIGRATION)
-            sudo /home/admin/config.scripts/blitz.migration.sh "import-gui"
-            exit 0
-            ;;
-        CONTINUE)
-            /home/admin/10setupBlitz.sh
-            exit 1;
-            ;;
-esac
+echo "Blitz command line options: blitzhelp"
+echo "Back to menus use command: raspiblitz"
+echo
+exit 0

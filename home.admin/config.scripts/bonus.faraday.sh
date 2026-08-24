@@ -1,23 +1,31 @@
 #!/bin/bash
 
+# NOTICE: Faraday is now prt of the 'bonus.lit.sh' bundle
+# this single install script will still be available for now
+# but main focus for the future development should be on LIT
+
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
  echo "Bonus App: faraday -> https://github.com/lightninglabs/faraday"
  echo "lnd.faraday.sh [status|on|off]"
+ echo "# DEPRECATED use instead: bonus.lit.sh"
  exit 1
 fi
 
+version="0.2.3-alpha"
+echo "## bonus.faraday.sh ${version}"
+
 # version and trusted release signer
-version="0.1.0-alpha"
 PGPkeys="https://keybase.io/carlakirkcohen/pgp_keys.asc"
 PGPcheck="15E7ECF257098A4EF91655EB4CA7FE54A6213C91"
 
 # 1. parameter [info|verified|reckless]
-mode="$1" 
+mode="$1"
 
 # GATHER DATA
 source /home/admin/raspiblitz.info
-source /mnt/hdd/raspiblitz.conf
+source <(/home/admin/_cache.sh get state)
+source /mnt/hdd/app-data/raspiblitz.conf
 
 # setting download directory
 downloadDir="/home/admin/download"
@@ -39,7 +47,7 @@ fi
 
 # check if already installed
 installed=0
-installedVersion=$(sudo -u admin frcli --version)
+installedVersion=$(sudo -u faraday /home/faraday/bin/frcli --version 2>/dev/null)
 if [ ${#installedVersion} -gt 0 ]; then
   installed=1
 fi
@@ -61,26 +69,28 @@ if [ "${mode}" = "menu" ]; then
     whiptail --title " ERROR " --msgbox "Faraday is not installed" 7 30
     exit 1
   fi
-  whiptail --title " Faraday " --msgbox "Faraday is a command line tool. On terminal call:
-frcli --help
+  whiptail --title " Faraday " --msgbox "
+Faraday is a command line tool. Details see:
+https://github.com/lightninglabs/faraday
 
-For more background read the following article:
-https://lightning.engineering/posts/2020-04-02-faraday" 11 60
+Terminal-Shortcut: 'faraday' to switch to the dedicated user.
+Or use like: sudo -u faraday /home/faraday/bin/frcli -help
+" 13 70
   exit 1
 fi
 
 # INSTALL
 if [ "${mode}" = "on" ] || [ "${mode}" = "1" ]; then
 
-  if [ $(sudo ls /home/faraday/.bashrc 2>/dev/null | grep -c ".bashrc") -gt 0 ]; then
+  if [ -f /etc/systemd/system/faraday.service ]; then
     echo "# FAIL - already installed"
     sleep 3
     exit 1
   fi
 
-  echo "# INSTALL bonus.faraday.sh"
+  echo "# INSTALL bonus.faraday.sh version: ${version}"
 
-  echo 
+  echo
   echo "# clean & change into download directory"
   sudo rm -r ${downloadDir}/*
   cd "${downloadDir}"
@@ -121,21 +131,21 @@ if [ "${mode}" = "on" ] || [ "${mode}" = "1" ]; then
     exit 1
   fi
 
-  echo 
+  echo
   echo "# getting gpg finger print"
-  gpg ./pgp_keys.asc
-  fingerprint=$(sudo gpg "${downloadDir}/pgp_keys.asc" 2>/dev/null | grep "${PGPcheck}" -c)
+  gpg --show-keys ./pgp_keys.asc
+  fingerprint=$(sudo gpg --show-keys "${downloadDir}/pgp_keys.asc" 2>/dev/null | grep "${PGPcheck}" -c)
   if [ ${fingerprint} -lt 1 ]; then
     echo "error='PGP author check failed'"
     exit 1
   fi
   echo "fingerprint='${fingerprint}'"
 
-  echo 
+  echo
   echo "# checking PGP finger print"
   gpg --import ./pgp_keys.asc
   sleep 3
-  verifyResult=$(gpg --verify manifest-v${version}.txt.sig 2>&1)
+  verifyResult=$(LANG=en_US.utf8; gpg --verify manifest-v${version}.txt.sig 2>&1)
   goodSignature=$(echo ${verifyResult} | grep 'Good signature' -c)
   echo "goodSignature='${goodSignature}'"
   correctKey=$(echo ${verifyResult} | tr -d " \t\n\r" | grep "${PGPcheck}" -c)
@@ -145,69 +155,99 @@ if [ "${mode}" = "on" ] || [ "${mode}" = "1" ]; then
     exit 1
   fi
 
+  # create dedicated user
+  echo "# Add the 'faraday' user"
+  sudo adduser --system --group --home /home/faraday faraday
+
+  # set PATH for the user
+  sudo bash -c "echo 'PATH=\$PATH:/home/faraday/bin/' >> /home/faraday/.profile"
+
   # install
   echo
-  echo "# unzip binary"
+  echo "# unzip binary: ${binaryName}"
   sudo -u admin tar -xzf ${binaryName}
   # removing the tar.gz ending from the binary
   directoryName="${binaryName%.*.*}"
   echo "# install binary directory '${directoryName}'"
-  sudo install -m 0755 -o root -g root -t /usr/local/bin ${directoryName}/*
+  sudo -u faraday mkdir -p /home/faraday/bin
+  sudo install -m 0755 -o faraday -g faraday -t /home/faraday/bin ${directoryName}/*
   sleep 3
-  installed=$(sudo -u admin frcli --version)
+
+  installed=$(sudo -u faraday /home/faraday/bin/frcli --version)
   if [ ${#installed} -eq 0 ]; then
     echo "error='install failed'"
     exit 1
   fi
 
-  # make sure faraday user exists (this will run the farday server)
-  echo "# Add the 'faraday' user"
-  sudo adduser --disabled-password --gecos "" faraday
-
+  # make sure symlink to central app-data directory exists ***"
+  sudo rm -rf /home/faraday/.lnd  # not a symlink.. delete it silently
+  # create symlink
+  sudo ln -s /mnt/hdd/app-data/lnd/ /home/faraday/.lnd
+  # sync all macaroons and unix groups for access
+  /home/admin/config.scripts/lnd.credentials.sh sync "${chain:-main}net"
+  # macaroons will be checked after install
+  # add user to group with admin access to lnd
+  sudo /usr/sbin/usermod --append --groups lndadmin faraday
   # add user to group with readonly access on lnd
   sudo /usr/sbin/usermod --append --groups lndreadonly faraday
- 
+  # add user to group with invoice access on lnd
+  sudo /usr/sbin/usermod --append --groups lndinvoice faraday
+  # add user to groups with all macaroons
+  sudo /usr/sbin/usermod --append --groups lndinvoices faraday
+  sudo /usr/sbin/usermod --append --groups lndchainnotifier faraday
+  sudo /usr/sbin/usermod --append --groups lndsigner faraday
+  sudo /usr/sbin/usermod --append --groups lndwalletkit faraday
+  sudo /usr/sbin/usermod --append --groups lndrouter faraday
+
   # install service
   echo "*** Install systemd ***"
-  sudo mkdir -p /mnt/hdd/temp/ 2>/dev/null
-  sudo chmod 777 /mnt/hdd/temp/
-  sudo chown bitcoin:bitcoin /mnt/hdd/temp/
-  sudo touch /mnt/hdd/temp/faraday.service
-  sudo chmod 777 /mnt/hdd/temp/faraday.service
-  cat > /mnt/hdd/temp/faraday.service <<EOF
+  echo "
 [Unit]
 Description=faraday
 Wants=lnd.service
 After=lnd.service
+PartOf=lnd.service
 
 [Service]
-WorkingDirectory=/home/faraday/
-ExecStart=faraday --macaroondir=/mnt/hdd/app-data/lnd/data/chain/${network}/${chain}net --macaroonfile=readonly.macaroon --tlscertpath=/mnt/hdd/app-data/lnd/tls.cert --rpcserver=127.0.0.1:10009
 User=faraday
+WorkingDirectory=/home/faraday/
+ExecStart=/home/faraday/bin/faraday \
+#--network=${chain}net
+#--connect_bitcoin \
+#--bitcoin.host=127.0.0.1:8332 \
+#--bitcoin.user=raspibolt \
+#--bitcoin.password=PASSWORD_B
 Restart=always
 TimeoutSec=120
 RestartSec=30
 StandardOutput=null
 StandardError=journal
 
+# Hardening measures
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+PrivateDevices=true
+
 [Install]
 WantedBy=multi-user.target
-EOF
-
-  sudo mv /mnt/hdd/temp/faraday.service /etc/systemd/system/faraday.service
-  sudo chown root:root /etc/systemd/system/faraday.service
-  sudo systemctl enable faraday
+" | sudo tee -a /etc/systemd/system/faraday.service
+    sudo systemctl enable faraday
+    echo "# OK - the Faraday service is now enabled"
   if [ "${state}" == "ready" ]; then
     sudo systemctl start faraday
   fi
 
-  echo "# flag in raspiblitz config"
-  if [ ${#faraday} -eq 0 ]; then
-    echo "faraday='on'" >> /mnt/hdd/raspiblitz.conf
-  fi
-  sudo sed -i "s/^faraday=.*/faraday=on/g" /mnt/hdd/raspiblitz.conf
+  echo "# default config path"
+  sudo mkdir /home/faraday/.faraday
+  sudo mkdir /home/faraday/.faraday/${chain}net
+  sudo chown -R faraday:faraday /home/faraday/.faraday
 
-  echo "# OK faraday Installed"
+  echo "# flag in raspiblitz config"
+  /home/admin/config.scripts/blitz.conf.sh set faraday "on"
+
+  echo "# OK Faraday is installed"
+  echo "# please 'restart' for clean creation of faraday tls/macaroons"
   exit 1
 
 fi
@@ -222,14 +262,14 @@ if [ "${mode}" = "off" ] || [ "${mode}" = "0" ]; then
   sudo systemctl disable faraday
   sudo rm /etc/systemd/system/faraday.service
 
-  echo "# remove faraday user"
+  echo "# remove faraday user & binary"
   sudo userdel -r -f faraday
 
   echo "# modify config file"
-  sudo sed -i "s/^faraday=.*/faraday=off/g" /mnt/hdd/raspiblitz.conf
+  /home/admin/config.scripts/blitz.conf.sh set faraday "off"
 
   exit 1
- 
+
 fi
 
 echo "error='parameter not known'"

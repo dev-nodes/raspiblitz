@@ -4,15 +4,15 @@ import re
 import subprocess
 import sys
 
-# IDEA: At the momemt its just Reverse-SSh Tunnels thats why [INTERNAL-PORT]<[EXTERNAL-PORT]
+# IDEA: At the moment its just Reverse-SSH Tunnels thats why [INTERNAL-PORT]<[EXTERNAL-PORT]
 # For the future also just local ssh tunnels could be added with [INTERNAL-PORT]-[EXTERNAL-PORT]
 # for the use case when a server wants to use a RaspiBlitz behind a NAT as Lightning backend
 
 # display config script info
 if len(sys.argv) <= 1 or sys.argv[1] == "-h" or sys.argv[1] == "help":
     print("forward ports from another server to raspiblitz with reverse SSH tunnel")
-    print("internet.sshtunnel.py [on|off|restore] [USER]@[SERVER:PORT] \"[INTERNAL-PORT]<[EXTERNAL-PORT]\"")
-    print("note that [INTERNAL-PORT]<[EXTERNAL-PORT] can one or multiple forwardings")
+    print("internet.sshtunnel.py on|off|restore USER@SERVER:PORT [--m:MONITORINGPORT] \"INTERNAL-PORT<EXTERNAL-PORT\"")
+    print("note that INTERNAL-PORT<EXTERNAL-PORT can one or multiple forwardings")
     sys.exit(1)
 
 #
@@ -31,15 +31,21 @@ After=network.target
 User=root
 Group=root
 Environment="AUTOSSH_GATETIME=0"
-ExecStart=/usr/bin/autossh -M 0 -N -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -o ServerAliveCountMax=2 [PLACEHOLDER]
+ExecStart=/usr/bin/autossh [MONITORING-PORT] -N -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -o ServerAliveCountMax=2 [PLACEHOLDER]
 StandardOutput=journal
+
+# Hardening measures
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+PrivateDevices=true
 
 [Install]
 WantedBy=multi-user.target
 """
 
 # get LND port form lnd.conf
-LND_PORT = subprocess.getoutput("sudo cat /mnt/hdd/lnd/lnd.conf | grep '^listen=*' | cut -f2 -d':'")
+LND_PORT = subprocess.getoutput("sudo cat /mnt/hdd/app-data/lnd/lnd.conf | grep '^listen=*' | cut -f2 -d':'")
 if len(LND_PORT) == 0:
     LND_PORT = "9735"
 
@@ -77,11 +83,24 @@ def on(restore_on_update=False):
 
     # generate additional parameter for autossh (forwarding ports)
     if len(sys.argv) < 4:
-        print("[INTERNAL-PORT]<[EXTERNAL-PORT] missing")
+        print("missing parameters")
         sys.exit(1)
+
+    # check for optional monitoring port parameter
+    i = 3
+    monitoringPort="-M 0"
+    optionalParameter=""
+    if sys.argv[3].count("--m:") > 0:
+         # get monitoring port number
+         monitoringPort = sys.argv[3][4:]
+         optionalParameter= "--m:{} ".format(monitoringPort)
+         monitoringPort = "-M {}".format(monitoringPort)
+         print("# found optional monitoring port: {}".format(monitoringPort))
+         # port forwadings start one parameter later
+         i = 4
+
     ssh_ports = ""
     additional_parameters = ""
-    i = 3
     while i < len(sys.argv):
 
         # check forwarding format
@@ -122,7 +141,8 @@ def on(restore_on_update=False):
 
     # generate custom service config
     service_data = SERVICE_TEMPLATE.replace("[PLACEHOLDER]", additional_parameters)
-
+    service_data = service_data.replace("[MONITORING-PORT]", monitoringPort)
+    
     # debug print out service
     print()
     print("*** New systemd service: {}".format(SERVICE_NAME))
@@ -148,16 +168,16 @@ def on(restore_on_update=False):
 
     # copy SSH keys for backup (for update with new sd card)
     print("making backup copy of SSH keys")
-    subprocess.call("sudo cp -r /root/.ssh /mnt/hdd/ssh/root_backup", shell=True)
+    subprocess.call("sudo /home/admin/config.scripts/blitz.ssh.sh backup", shell=True)
     print("DONE")
 
     # write ssh tunnel data to raspiblitz config (for update with new sd card)
     print("*** Updating RaspiBlitz Config")
-    with open('/mnt/hdd/raspiblitz.conf') as f:
+    with open('/mnt/hdd/app-data/raspiblitz.conf') as f:
         file_content = f.read()
     if file_content.count("sshtunnel=") == 0:
         file_content = file_content + "\nsshtunnel=''"
-    file_content = re.sub("sshtunnel=.*", "sshtunnel='%s %s'" % (ssh_server, ssh_ports), file_content)
+    file_content = re.sub("sshtunnel=.*", "sshtunnel='%s %s%s'" % (ssh_server, optionalParameter, ssh_ports), file_content)
 
     if not restore_on_update:
         server_domain = ssh_server.split("@")[1]
@@ -176,12 +196,12 @@ def on(restore_on_update=False):
 
         # make sure server_domain is set as tls alias
         print("Setting server as tls alias")
-        old_config_hash = subprocess.getoutput("sudo shasum -a 256 /mnt/hdd/lnd/lnd.conf")
-        subprocess.call("sudo sed -i \"s/^#tlsextradomain=.*/tlsextradomain=/g\" /mnt/hdd/lnd/lnd.conf", shell=True)
+        old_config_hash = subprocess.getoutput("sudo shasum -a 256 /mnt/hdd/app-data/lnd/lnd.conf")
+        subprocess.call("sudo sed -i \"s/^#tlsextradomain=.*/tlsextradomain=/g\" /mnt/hdd/app-data/lnd/lnd.conf", shell=True)
         subprocess.call(
-            "sudo sed -i \"s/^tlsextradomain=.*/tlsextradomain={}/g\" /mnt/hdd/lnd/lnd.conf".format(ssh_server_host),
+            "sudo sed -i \"s/^tlsextradomain=.*/tlsextradomain={}/g\" /mnt/hdd/app-data/lnd/lnd.conf".format(ssh_server_host),
             shell=True)
-        new_config_hash = subprocess.getoutput("sudo shasum -a 256 /mnt/hdd/lnd/lnd.conf")
+        new_config_hash = subprocess.getoutput("sudo shasum -a 256 /mnt/hdd/app-data/lnd/lnd.conf")
         if old_config_hash != new_config_hash:
             print("lnd.conf changed ... generating new TLS cert")
             subprocess.call("sudo /home/admin/config.scripts/lnd.tlscert.sh refresh", shell=True)
@@ -196,7 +216,7 @@ def on(restore_on_update=False):
             print("No need to set fixed address for LND with raspiblitz lndAddress")
     file_content = "".join([s for s in file_content.splitlines(True) if s.strip("\r\n")]) + "\n"
     print(file_content)
-    with open("/mnt/hdd/raspiblitz.conf", "w") as text_file:
+    with open("/mnt/hdd/app-data/raspiblitz.conf", "w") as text_file:
         text_file.write(file_content)
     print("DONE")
 
@@ -218,7 +238,7 @@ def on(restore_on_update=False):
     print("*** WIN - SSH TUNNEL SERVICE SETUP ***")
     print("**************************************")
     print("See chapter 'How to setup port-forwarding with a SSH tunnel?' in:")
-    print("https://github.com/rootzoll/raspiblitz/blob/master/FAQ.md")
+    print("https://github.com/rootzoll/raspiblitz/blob/dev/FAQ.md")
     print("- Tunnel service needs final reboot to start.")
     print("- After reboot check logs: sudo journalctl -f -u {}".format(SERVICE_NAME))
     print("- Make sure the SSH pub key of this RaspiBlitz is in 'authorized_keys' of {}:".format(ssh_server_host))
@@ -244,12 +264,12 @@ def off():
     print()
 
     print("*** Removing SSH Tunnel data from RaspiBlitz config")
-    with open('/mnt/hdd/raspiblitz.conf') as f:
+    with open('/mnt/hdd/app-data/raspiblitz.conf') as f:
         file_content = f.read()
     file_content = re.sub("sshtunnel=.*", "", file_content)
     file_content = re.sub("\n\n", "\n", file_content)
     print(file_content)
-    with open("/mnt/hdd/raspiblitz.conf", "w") as text_file:
+    with open("/mnt/hdd/app-data/raspiblitz.conf", "w") as text_file:
         text_file.write(file_content)
     print("OK Done")
 

@@ -4,14 +4,27 @@
 # ~/.config/btc-rpc-explorer.env
 # https://github.com/janoside/btc-rpc-explorer/blob/master/.env-sample
 
+# use commit hash, so that also in between updates can be used if needed
+GITHUBCOMMIT="8ed77ab225f5507c521b570d5240624de597ad44" #3.5.1
+
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
  echo "# small config script to switch BTC-RPC-explorer on or off"
+ echo "# bonus.btc-rpc-explorer.sh [install|uninstall]"
  echo "# bonus.btc-rpc-explorer.sh [status|on|off]"
+ echo "# bonus.btc-rpc-explorer.sh prestart"
  exit 1
 fi
 
-source /mnt/hdd/raspiblitz.conf
+PGPsigner="janoside"
+PGPpubkeyLink="https://github.com/janoside.gpg"
+PGPpubkeyFingerprint="F579929B39B119CC7B0BB71FB326ACF51F317B69"
+
+source /mnt/hdd/app-data/raspiblitz.conf 2>/dev/null
+
+##########################
+# MENU
+#########################
 
 # show info menu
 if [ "$1" = "menu" ]; then
@@ -30,32 +43,34 @@ This can take multiple hours.
     exit 0
   fi
 
-  # get network info
-  localip=$(ip addr | grep 'state UP' -A2 | egrep -v 'docker0' | grep 'eth0\|wlan0' | tail -n1 | awk '{print $2}' | cut -f1 -d'/')
-  toraddress=$(sudo cat /mnt/hdd/tor/btc-rpc-explorer/hostname 2>/dev/null)
-  fingerprint=$(openssl x509 -in /mnt/hdd/app-data/nginx/tls.cert -fingerprint -noout | cut -d"=" -f2)
+  # check if password protected
+  isBitcoinWalletOff=$(sudo cat /mnt/hdd/app-data/${network}/${network}.conf | grep -c "^disablewallet=1")
+  passwordInfo=""
+  if [ "${isBitcoinWalletOff}" != "1" ]; then
+    passwordInfo="Login is 'admin' with your Password B"
+  fi
 
   if [ "${runBehindTor}" = "on" ] && [ ${#toraddress} -gt 0 ]; then
 
     # TOR
-    /home/admin/config.scripts/blitz.lcd.sh qr "${toraddress}"
-    whiptail --title " BTC-RPC-Explorer " --msgbox "Open in your local web browser & accept self-signed cert:
-https://${localip}:3021\n
-SHA1 Thumb/Fingerprint:
+    sudo /home/admin/config.scripts/blitz.display.sh qr "${toraddress}"
+    whiptail --title " BTC-RPC-Explorer " --msgbox "Open in your local web browser:
+http://${localIP}:3020\n
+https://${localIP}:3021 with Fingerprint:
 ${fingerprint}\n
-Login is 'admin' with your Password B\n
+${passwordInfo}\n
 Hidden Service address for TOR Browser (QR see LCD):
 ${toraddress}
 " 16 67
-    /home/admin/config.scripts/blitz.lcd.sh hide
+    sudo /home/admin/config.scripts/blitz.display.sh hide
   else
 
     # IP + Domain
-    whiptail --title " BTC-RPC-Explorer " --msgbox "Open in your local web browser & accept self-signed cert:
-https://${localip}:3021\n
-SHA1 Thumb/Fingerprint:
+    whiptail --title " BTC-RPC-Explorer " --msgbox "Open in your local web browser:
+http://${localIP}:3020\n
+https://${localIP}:3021 with Fingerprint:
 ${fingerprint}\n
-Login is 'admin' with your Password B\n
+${passwordInfo}\n
 Activate TOR to access the web block explorer from outside your local network.
 " 16 54
   fi
@@ -64,16 +79,39 @@ Activate TOR to access the web block explorer from outside your local network.
   exit 0
 fi
 
-# add default value to raspi config if needed
-if ! grep -Eq "^BTCRPCexplorer=" /mnt/hdd/raspiblitz.conf; then
-  echo "BTCRPCexplorer=off" >> /mnt/hdd/raspiblitz.conf
-fi
-
 # status
 if [ "$1" = "status" ]; then
 
+  echo "version='${VERSION}'"
+
+    fatpack=$(compgen -u | grep -c btcrpcexplorer)
+    echo "fatpack=${fatpack}"
+
   if [ "${BTCRPCexplorer}" = "on" ]; then
     echo "configured=1"
+
+    installed=$(sudo ls /etc/systemd/system/btc-rpc-explorer.service 2>/dev/null | grep -c 'btc-rpc-explorer.service')
+    echo "installed=${installed}"
+
+    # get network info
+    localIP=$(hostname -I | awk '{print $1}')
+    toraddress=$(sudo cat /mnt/hdd/app-data/tor/btc-rpc-explorer/hostname 2>/dev/null)
+    fingerprint=$(openssl x509 -in /mnt/hdd/app-data/nginx/tls.cert -fingerprint -noout | cut -d"=" -f2)
+
+    authMethod="user_admin_password_b"
+    isBitcoinWalletOff=$(cat /mnt/hdd/app-data/bitcoin/bitcoin.conf | grep -c "^disablewallet=1")
+    if [ "${isBitcoinWalletOff}" == "1" ]; then
+      authMethod="none"
+    fi
+
+    echo "localIP='${localIP}'"
+    echo "httpPort='3020'"
+    echo "httpsPort='3021'"
+    echo "httpsForced='0'"
+    echo "httpsSelfsigned='1'"
+    echo "authMethod='${authMethod}'"
+    echo "toraddress='${toraddress}'"
+    echo "fingerprint='${fingerprint}'"
 
     # check indexing
     source <(sudo /home/admin/config.scripts/network.txindex.sh status)
@@ -89,50 +127,173 @@ if [ "$1" = "status" ]; then
 
   else
     echo "configured=0"
+    echo "installed=0"
   fi
   exit 0
 fi
 
-# stop service
+##########################
+# PRESTART
+# - will be called as prestart by systemd service (as user btcrpcexplorer)
+#########################
+
+if [ "$1" = "prestart" ]; then
+
+  # users need to be `btcrpcexplorer` so that it can be run by systemd as prestart (no SUDO available)
+  if [ "$USER" != "btcrpcexplorer" ]; then
+    echo "# FAIL: run as user btcrpcexplorer"
+    exit 1
+  fi
+
+  echo "## btc-rpc-explorer.service PRESTART CONFIG"
+  echo "# --> /home/btcrpcexplorer/.config/btc-rpc-explorer.env"
+
+  # Robust initial values to avoid unset-variable issues
+  isElectrsReady=0
+  isFulcrumReady=0
+  electrumTCPport=""
+
+  # check if electrs is installed & running
+  if [ "${ElectRS}" == "on" ]; then
+
+    # CHECK THAT ELECTRS INDEX IS BUILT (WAITLOOP)
+    # electrs listening in port 50001 means index is built
+    # Use flags: t = tcp protocol only  /  a = list all connection states (includes LISTEN)  /  n = don't resolve names => no dns spam
+    isElectrsReady=$(netstat -tan | grep -c "50001")
+    echo "# electrs is ON .. and ready (${isElectrsReady})"
+    electrumTCPport=50001
+  fi
+
+  # check if fulcrum is installed & running
+  if [ "${fulcrum}" == "on" ]; then
+    isFulcrumReady=$(netstat -tan | grep -c "50021")
+    echo "# fulcrum is ON .. and ready (${isFulcrumReady})"
+    electrumTCPport=50021
+  fi
+
+  # Exit only if either service is on but not ready
+  if { [ "${ElectRS}" == "on" ] && [ "${isElectrsReady}" == "0" ]; } || { [ "${fulcrum}" == "on" ] && [ "${isFulcrumReady}" == "0" ]; }; then
+    echo "# An Electrum Server is ON but not ready .. might still building index - kick systemd service into fail/wait/restart"
+    exit 1
+  fi
+
+  if [ "${isElectrsReady}" -gt 0 ] || [ "${isFulcrumReady}" -gt 0 ]; then
+    # CHECK THAT ELECTRUM SERVER IS PART OF CONFIG
+    echo "# updating BTCEXP_ADDRESS_API=electrumx"
+    sed -i 's/^BTCEXP_ADDRESS_API=.*/BTCEXP_ADDRESS_API=electrumx/g' /home/btcrpcexplorer/.config/btc-rpc-explorer.env
+    # Use different delimiter to avoid collision with "tcp://"
+    sed -i "s|^BTCEXP_ELECTRUMX_SERVERS=.*|BTCEXP_ELECTRUMX_SERVERS=tcp://127.0.0.1:${electrumTCPport}|g" /home/btcrpcexplorer/.config/btc-rpc-explorer.env
+  else
+    # ELECTRS=OFF --> MAKE SURE IT IS NOT CONNECTED
+    echo "# updating BTCEXP_ADDRESS_API=none"
+    sed -i 's/^BTCEXP_ADDRESS_API=.*/BTCEXP_ADDRESS_API=none/g' /home/btcrpcexplorer/.config/btc-rpc-explorer.env
+  fi
+
+  #  UPDATE RPC PASSWORD
+  RPCPASSWORD=$(cat /mnt/hdd/app-data/${network}/${network}.conf | grep "^rpcpassword=" | cut -d "=" -f2)
+  echo "# updating BTCEXP_BITCOIND_PASS=${RPCPASSWORD}"
+  sed -i "s/^BTCEXP_BITCOIND_PASS=.*/BTCEXP_BITCOIND_PASS=${RPCPASSWORD}/g" /home/btcrpcexplorer/.config/btc-rpc-explorer.env
+
+  # WALLET PROTECTION (only if Bitcoin has wallet active protect BTC-RPC-Explorer with additional passwordB)
+  isBitcoinWalletOff=$(cat /mnt/hdd/app-data/${network}/${network}.conf | grep -c "^disablewallet=1")
+  if [ "${isBitcoinWalletOff}" == "1" ]; then
+    echo "# updating BTCEXP_BASIC_AUTH_PASSWORD= --> no password needed because wallet is disabled"
+    sed -i "s/^BTCEXP_BASIC_AUTH_PASSWORD=.*/BTCEXP_BASIC_AUTH_PASSWORD=/g" /home/btcrpcexplorer/.config/btc-rpc-explorer.env
+  else
+    echo "# updating BTCEXP_BASIC_AUTH_PASSWORD=${RPCPASSWORD} --> enable password to protect wallet"
+    sed -i "s/^BTCEXP_BASIC_AUTH_PASSWORD=.*/BTCEXP_BASIC_AUTH_PASSWORD=${RPCPASSWORD}/g" /home/btcrpcexplorer/.config/btc-rpc-explorer.env
+  fi
+
+  exit 0 # exit with clean code
+fi
+
+# stop service (for all calls below)
 echo "# making sure services are not running"
 sudo systemctl stop btc-rpc-explorer 2>/dev/null
 
+# install (code & compile)
+if [ "$1" = "install" ]; then
+
+  # check if already installed
+  isInstalled=$(compgen -u | grep -c btcrpcexplorer)
+  if [ "${isInstalled}" != "0" ]; then
+    echo "result='already installed'"
+    exit 0
+  fi
+
+  echo "# *** INSTALL BTC-RPC-EXPLORER ***"
+
+  # install nodeJS
+  /home/admin/config.scripts/bonus.nodejs.sh on
+
+  # add btcrpcexplorer user
+  sudo adduser --system --group --home /home/btcrpcexplorer btcrpcexplorer
+
+  # install btc-rpc-explorer
+  cd /home/btcrpcexplorer
+  sudo -u btcrpcexplorer git clone https://github.com/janoside/btc-rpc-explorer.git
+  cd btc-rpc-explorer
+  sudo -u btcrpcexplorer git reset --hard ${GITHUBCOMMIT}
+  sudo -u btcrpcexplorer /home/admin/config.scripts/blitz.git-verify.sh "${PGPsigner}" "${PGPpubkeyLink}" "${PGPpubkeyFingerprint}" || exit 1
+  sudo -u btcrpcexplorer npm ci
+  if ! [ $? -eq 0 ]; then
+      echo "FAIL - npm ci did not run correctly, aborting"
+      echo "result='fail npm ci'"
+      exit 1
+  fi
+
+  exit 0
+fi
+
+# remove from system
+if [ "$1" = "uninstall" ]; then
+
+  # check if still active
+  isActive=$(sudo ls /etc/systemd/system/btc-rpc-explorer.service 2>/dev/null | grep -c 'btc-rpc-explorer.service')
+  if [ "${isActive}" != "0" ]; then
+    echo "result='still in use'"
+    exit 1
+  fi
+
+  echo "# *** UNINSTALL BTC-RPC-EXPLORER ***"
+
+  # always delete user and home directory
+  sudo userdel -rf btcrpcexplorer
+
+  exit 0
+fi
+
+##########################
+# ON
+#########################
+
 # switch on
 if [ "$1" = "1" ] || [ "$1" = "on" ]; then
-  echo "# *** INSTALL BTC-RPC-EXPLORER ***"
+
+  # check if code is already installed
+  isInstalled=$(compgen -u | grep -c btcrpcexplorer)
+  if [ "${isInstalled}" == "0" ]; then
+    echo "# Installing code base & dependencies first .."
+    /home/admin/config.scripts/bonus.btc-rpc-explorer.sh install || exit 1
+  fi
+
+  echo "# *** ACTIVATE BTC-RPC-EXPLORER ***"
 
   isInstalled=$(sudo ls /etc/systemd/system/btc-rpc-explorer.service 2>/dev/null | grep -c 'btc-rpc-explorer.service')
   if [ ${isInstalled} -eq 0 ]; then
 
-    # install nodeJS
-    /home/admin/config.scripts/bonus.nodejs.sh on
-
     # make sure that txindex of blockchain is switched on
     /home/admin/config.scripts/network.txindex.sh on
-    
-    # add btcrpcexplorer user
-    sudo adduser --disabled-password --gecos "" btcrpcexplorer
-
-    # install btc-rpc-explorer
-    cd /home/btcrpcexplorer
-    sudo -u btcrpcexplorer git clone https://github.com/janoside/btc-rpc-explorer.git
-    cd btc-rpc-explorer
-    sudo -u btcrpcexplorer git reset --hard v2.0.0
-    sudo -u btcrpcexplorer npm install
-    if ! [ $? -eq 0 ]; then
-        echo "FAIL - npm install did not run correctly, aborting"
-        exit 1
-    fi
 
     # prepare .env file
     echo "# getting RPC credentials from the ${network}.conf"
 
-    RPC_USER=$(sudo cat /mnt/hdd/${network}/${network}.conf | grep rpcuser | cut -c 9-)
-    PASSWORD_B=$(sudo cat /mnt/hdd/${network}/${network}.conf | grep rpcpassword | cut -c 13-)
+    RPC_USER=$(sudo cat /mnt/hdd/app-data/${network}/${network}.conf | grep rpcuser | cut -c 9-)
+    PASSWORD_B=$(sudo cat /mnt/hdd/app-data/${network}/${network}.conf | grep rpcpassword | cut -c 13-)
 
-    touch /home/admin/btc-rpc-explorer.env
-    sudo chmod 600 /home/admin/btc-rpc-explorer.env || exit 1 
-    cat > /home/admin/btc-rpc-explorer.env <<EOF
+    touch /var/cache/raspiblitz/btc-rpc-explorer.env
+    chmod 600 /var/cache/raspiblitz/btc-rpc-explorer.env || exit 1
+    cat > /var/cache/raspiblitz/btc-rpc-explorer.env <<EOF
 # Host/Port to bind to
 # Defaults: shown
 BTCEXP_HOST=0.0.0.0
@@ -149,9 +310,13 @@ BTCEXP_BITCOIND_USER=$RPC_USER
 BTCEXP_BITCOIND_PASS=$PASSWORD_B
 #BTCEXP_BITCOIND_COOKIE=/path/to/bitcoind/.cookie
 BTCEXP_BITCOIND_RPC_TIMEOUT=10000
+# Privacy mode disables:
+# Exchange-rate queries, IP-geolocation queries
+# Default: false
+BTCEXP_PRIVACY_MODE=true
 # Password protection for site via basic auth (enter any username, only the password is checked)
 # Default: none
-BTCEXP_BASIC_AUTH_PASSWORD=$PASSWORD_B
+#BTCEXP_BASIC_AUTH_PASSWORD=$PASSWORD_B
 # Select optional "address API" to display address tx lists and balances
 # Options: electrumx, blockchain.com, blockchair.com, blockcypher.com
 # If electrumx set, the BTCEXP_ELECTRUMX_SERVERS variable must also be
@@ -160,7 +325,8 @@ BTCEXP_BASIC_AUTH_PASSWORD=$PASSWORD_B
 BTCEXP_ADDRESS_API=none
 BTCEXP_ELECTRUMX_SERVERS=tcp://127.0.0.1:50001
 EOF
-    sudo mv /home/admin/btc-rpc-explorer.env /home/btcrpcexplorer/.config/btc-rpc-explorer.env
+    sudo -u btcrpcexplorer mkdir /home/btcrpcexplorer/.config
+    sudo mv /var/cache/raspiblitz/btc-rpc-explorer.env /home/btcrpcexplorer/.config/btc-rpc-explorer.env
     sudo chown btcrpcexplorer:btcrpcexplorer /home/btcrpcexplorer/.config/btc-rpc-explorer.env
 
     # open firewall
@@ -169,7 +335,6 @@ EOF
     sudo ufw allow 3021 comment 'btc-rpc-explorer HTTPS'
     echo ""
 
-    
     ##################
     # NGINX
     ##################
@@ -191,67 +356,86 @@ EOF
 
     # install service
     echo "*** Install btc-rpc-explorer systemd ***"
-    cat > /home/admin/btc-rpc-explorer.service <<EOF
+    cat > /var/cache/raspiblitz/btc-rpc-explorer.service <<EOF
 # systemd unit for BTC RPC Explorer
 
 [Unit]
 Description=btc-rpc-explorer
 Wants=${network}d.service
 After=${network}d.service
+StartLimitIntervalSec=0
 
 [Service]
+User=btcrpcexplorer
+ExecStartPre=/home/admin/config.scripts/bonus.btc-rpc-explorer.sh prestart
 WorkingDirectory=/home/btcrpcexplorer/btc-rpc-explorer
 ExecStart=/usr/bin/npm start
-User=btcrpcexplorer
-# Restart on failure but no more than 2 time every 10 minutes (600 seconds). Otherwise stop
 Restart=on-failure
-StartLimitIntervalSec=600
-StartLimitBurst=2
+RestartSec=20
+LogLevelMax=4
+
+# Hardening measures
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+PrivateDevices=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    sudo mv /home/admin/btc-rpc-explorer.service /etc/systemd/system/btc-rpc-explorer.service 
+    sudo mv /var/cache/raspiblitz/btc-rpc-explorer.service /etc/systemd/system/btc-rpc-explorer.service
     sudo systemctl enable btc-rpc-explorer
     echo "# OK - the BTC-RPC-explorer service is now enabled"
 
-  else 
+  else
     echo "# BTC-RPC-explorer already installed."
   fi
 
   # setting value in raspi blitz config
-  sudo sed -i "s/^BTCRPCexplorer=.*/BTCRPCexplorer=on/g" /mnt/hdd/raspiblitz.conf
-  
-  echo "# needs to finish creating txindex to be functional"
-  echo "# monitor with: sudo tail -n 20 -f /mnt/hdd/bitcoin/debug.log"
+  sudo /home/admin/config.scripts/blitz.conf.sh set BTCRPCexplorer "on"
 
-  ## Enable BTCEXP_ADDRESS_API if BTC-RPC-Explorer is active
-  # see /home/admin/config.scripts/bonus.electrsexplorer.sh
-  # run every 10 min by _background.sh
+  echo "# needs to finish creating txindex to be functional"
+  echo "# monitor with: sudo tail -n 20 -f /mnt/hdd/app-data/bitcoin/debug.log"
+  echo "# npm audit fix"
+  cd /home/btcrpcexplorer/btc-rpc-explorer/
+  sudo npm audit fix
 
   # Hidden Service for BTC-RPC-explorer if Tor is active
-  source /mnt/hdd/raspiblitz.conf
+  source /mnt/hdd/app-data/raspiblitz.conf
   if [ "${runBehindTor}" = "on" ]; then
-    # make sure to keep in sync with internet.tor.sh script
-    /home/admin/config.scripts/internet.hiddenservice.sh btc-rpc-explorer 80 3022 443 3023
+    # make sure to keep in sync with tor.network.sh script
+    sudo /home/admin/config.scripts/tor.onion-service.sh btc-rpc-explorer 80 3022 443 3023
   fi
+
+  source <(/home/admin/_cache.sh get state)
+  if [ "${state}" == "ready" ]; then
+    # start service
+    echo "# starting service ..."
+    sudo systemctl start btc-rpc-explorer 2>/dev/null
+    sleep 10
+  fi
+
+  # needed for API/WebUI to signal successfull install
+  echo "result='OK'"
   exit 0
 fi
+
+##########################
+# OFF
+#########################
 
 # switch off
 if [ "$1" = "0" ] || [ "$1" = "off" ]; then
 
   # setting value in raspi blitz config
-  sudo sed -i "s/^BTCRPCexplorer=.*/BTCRPCexplorer=off/g" /mnt/hdd/raspiblitz.conf
+  sudo /home/admin/config.scripts/blitz.conf.sh set BTCRPCexplorer "off"
 
   isInstalled=$(sudo ls /etc/systemd/system/btc-rpc-explorer.service 2>/dev/null | grep -c 'btc-rpc-explorer.service')
   if [ ${isInstalled} -eq 1 ]; then
     echo "# *** REMOVING BTC-RPC-explorer ***"
     sudo systemctl disable btc-rpc-explorer
     sudo rm /etc/systemd/system/btc-rpc-explorer.service
-    # delete user and home directory
-    sudo userdel -rf btcrpcexplorer
 
     # remove nginx symlinks
     sudo rm -f /etc/nginx/sites-enabled/btcrpcexplorer_ssl.conf
@@ -265,21 +449,24 @@ if [ "$1" = "0" ] || [ "$1" = "off" ]; then
 
     # Hidden Service if Tor is active
     if [ "${runBehindTor}" = "on" ]; then
-      # make sure to keep in sync with internet.tor.sh script
-      /home/admin/config.scripts/internet.hiddenservice.sh off btc-rpc-explorer
+      # make sure to keep in sync with tor.network.sh script
+      sudo /home/admin/config.scripts/tor.onion-service.sh off btc-rpc-explorer
     fi
 
     echo "# OK BTC-RPC-explorer removed."
-  
-  else 
+
+  else
     echo "# BTC-RPC-explorer is not installed."
   fi
 
   # close ports on firewall
   sudo ufw deny 3020
   sudo ufw deny 3021
+
+  # needed for API/WebUI to signal successfull install
+  echo "result='OK'"
   exit 0
 fi
 
-echo "error='unknown parameter'
+echo "error='unknown parameter'"
 exit 1

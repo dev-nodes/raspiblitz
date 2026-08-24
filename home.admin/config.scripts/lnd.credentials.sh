@@ -3,46 +3,21 @@
 # command info
 if [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
   echo "tool to reset or sync credentials (e.g. macaroons)"
-  echo "lnd.credentials.sh [reset|sync|check] [?tls|macaroons|keepold]"
+  echo "lnd.credentials.sh [reset|sync|check] <mainnet|testnet|signet> <?tls|macaroons|keepold>"
   exit 1
 fi
 
-# interactive choose type of action
-if [ "$1" = "" ] || [ $# -eq 0 ]; then
-    OPTIONS=()
-    OPTIONS+=(RESET "Recreate Macaroons + TLS")
-    OPTIONS+=(SYNC "Sync with RaspiBlitz Apps/Users")
-    OPTIONS+=(EXPORT "Get Macaroons and TLS.cert")
-    CHOICE=$(dialog --clear \
-                --backtitle "RaspiBlitz" \
-                --title "Manage LND credentials" \
-                --menu "Choose action" \
-                11 50 7 \
-                "${OPTIONS[@]}" \
-                2>&1 >/dev/tty)
-    clear
-    case $CHOICE in
-        RESET)
-          sudo /home/admin/config.scripts/lnd.credentials.sh reset
-          echo "Press ENTER to return to main menu."
-          read key
-          exit 0
-          ;;
-        SYNC)
-          sudo /home/admin/config.scripts/lnd.credentials.sh sync
-          echo "Press ENTER to return to main menu."
-          read key
-          exit 0
-          ;;
-        EXPORT)
-          sudo /home/admin/config.scripts/lnd.export.sh
-          exit 0
-          ;;
-    esac
+# load data from config
+source /mnt/hdd/app-data/raspiblitz.conf
+
+if [ $# -gt 1 ];  then
+  CHAIN=$2
+  chain=${CHAIN::-3}
+else
+  CHAIN=${chain}net
 fi
 
-# load data from config
-source /mnt/hdd/raspiblitz.conf
+source <(/home/admin/config.scripts/network.aliases.sh getvars lnd ${CHAIN})
 
 ###########################
 # FUNCTIONS
@@ -51,24 +26,22 @@ source /mnt/hdd/raspiblitz.conf
 function copy_mac_set_perms() {
   local file_name=${1}  # the file name (e.g. admin.macaroon)
   local group_name=${2} # the unix group name (e.g. lndadmin)
-  local n=${3:-bitcoin} # the network (e.g. bitcoin or litecoin) defaults to bitcoin
+  local n=${3:-bitcoin} # the network (e.g. bitcoin) defaults to bitcoin
   local c=${4:-main}    # the chain (e.g. main, test, sim, reg) defaults to main (for mainnet)
-
-  sudo /bin/cp /mnt/hdd/lnd/data/chain/"${n}"/"${c}"net/"${file_name}" /mnt/hdd/app-data/lnd/data/chain/"${n}"/"${c}"net/"${file_name}"
   sudo /bin/chown --silent admin:"${group_name}" /mnt/hdd/app-data/lnd/data/chain/"${n}"/"${c}"net/"${file_name}"
-  sudo /bin/chmod --silent 640 /mnt/hdd/app-data/lnd/data/chain/"${n}"/"${c}"net/"${file_name}"
+  sudo /bin/chmod --silent 750 /mnt/hdd/app-data/lnd/data/chain/"${n}"/"${c}"net/"${file_name}"
 }
 
 function check_macaroons() {
-macaroons="admin.macaroon invoice.macaroon readonly.macaroon invoices.macaroon chainnotifier.macaroon signer.macaroon  walletkit.macaroon router.macaroon"
+macaroons="admin.macaroon invoice.macaroon readonly.macaroon invoices.macaroon chainnotifier.macaroon signer.macaroon walletkit.macaroon router.macaroon"
 missing=0
 for macaroon in $macaroons
 do
   local file_name=${macaroon}
-  local n=${1:-bitcoin} # the network (e.g. bitcoin or litecoin) defaults to bitcoin
+  local n=${1:-bitcoin} # the network (e.g. bitcoin) defaults to bitcoin
   local c=${2:-main}    # the chain (e.g. main, test, sim, reg) defaults to main (for mainnet)
   if [ ! -f /mnt/hdd/app-data/lnd/data/chain/"${n}"/"${c}"net/"${macaroon}" ]; then
-    missing=$(($missing + 1))
+    missing=$((missing + 1))
     echo "# ${macaroon} is missing ($missing)"
   else
     echo "# ${macaroon} is present"
@@ -82,41 +55,44 @@ done
 if [ "$1" = "reset" ]; then
 
   clear
-  echo "### lnd.credentials.sh reset"
+  echo "### lnd.credentials.sh reset ${CHAIN}"
 
   # default reset both
   resetTLS=1
   resetMacaroons=1
 
   # optional second paramter to just reset one on them
-  if [ "$2" == "tls" ]; then
+  if [ "$3" == "tls" ]; then
     echo "# just resetting TLS"
     resetTLS=1
     resetMacaroons=0
   fi
-  if [ "$2" == "macaroons" ]; then
+  if [ "$3" == "macaroons" ]; then
     echo "# just resetting macaroons"
     resetTLS=0
     resetMacaroons=1
     keepOldMacaroons=0
   fi
-  if [ "$2" == "keepold" ]; then
-    echo "# add the missing default macaroons without deauthenticating the old ones"
+  if [ "$3" == "keepold" ]; then
+    echo "# add the missing default macaroons without de-authenticating the old ones"
     resetTLS=0
     resetMacaroons=1
     keepOldMacaroons=1
   fi
 
-
   if [ ${resetMacaroons} -eq 1 ]; then
     echo "## Resetting Macaroons"
     echo "# all your macaroons get deleted and recreated"
     cd || exit
+    # shellcheck disable=SC2154 # gets the ${network} from the raspiblitz.conf
     sudo find /mnt/hdd/app-data/lnd/data/chain/"${network}"/"${chain}"net/ -iname '*.macaroon' -delete
-    sudo find /home/bitcoin/.lnd/data/chain/"${network}"/"${chain}"net/ -iname '*.macaroon' -delete
-    if [ ${keepOldMacaroons} -eq 0 ]; then
-      sudo rm /home/bitcoin/.lnd/data/chain/"${network}"/"${chain}"net/macaroons.db
+    sudo find /mnt/hdd/app-data/lnd/data/chain/"${network}"/"${chain}"net/ -iname '*.macaroon' -delete
+    if [ "${keepOldMacaroons}" != "1" ]; then
+      sudo rm /mnt/hdd/app-data/lnd/data/chain/"${network}"/"${chain}"net/macaroons.db
     fi
+
+    echo "# delete also lit macaroons if present"
+    sudo rm /mnt/hdd/app-data/.lit/mainnet/lit.macaroon 2>/dev/null
   fi
 
   if [ ${resetTLS} -eq 1 ]; then
@@ -128,12 +104,13 @@ if [ "$1" = "reset" ]; then
 
   # unlock wallet after restart
   echo "# restarting LND ... wait 10 secs"
-  sudo systemctl start lnd
-  sleep 10
+  # shellcheck disable=SC2154
+  sudo systemctl start "${netprefix}lnd"
+  sleep 20
 
   # unlock wallet after restart
-  sudo /home/admin/config.scripts/lnd.unlock.sh
-  sleep 10
+  sudo /home/admin/config.scripts/lnd.unlock.sh "${CHAIN}"
+  sleep 15
 
   if [ ${resetMacaroons} -eq 1 ]; then
     echo "# copy new macaroons to central app-data directory and ensure unix ownerships and permissions"
@@ -142,6 +119,11 @@ if [ "$1" = "reset" ]; then
     copy_mac_set_perms readonly.macaroon lndreadonly "${network}" "${chain}"
     echo "# OK DONE"
   fi
+
+  /home/admin/config.scripts/lnd.credentials.sh sync "${CHAIN}"
+
+  echo "# restart also litd if present (reboot advised)"
+  sudo systemctl restart litd 2>/dev/null
 
 ###########################
 # SYNC
@@ -153,7 +135,7 @@ elif [ "$1" = "sync" ]; then
   echo "# make sure LND app-data directories exist"
   sudo /bin/mkdir --mode 0755 --parents /mnt/hdd/app-data/lnd/data/chain/"${network}"/"${chain}"net/
 
-  echo `# make sure all user groups exit for default macaroons`
+  echo `# make sure all user groups exist for default macaroons`
   sudo /usr/sbin/groupadd --force --gid 9700 lndadmin
   sudo /usr/sbin/groupadd --force --gid 9701 lndinvoice
   sudo /usr/sbin/groupadd --force --gid 9702 lndreadonly
@@ -173,49 +155,17 @@ elif [ "$1" = "sync" ]; then
   copy_mac_set_perms walletkit.macaroon lndwalletkit "${network}" "${chain}"
   copy_mac_set_perms router.macaroon lndrouter "${network}" "${chain}"
 
-  echo "# make sure admin has a symlink at ~/.lnd to /mnt/hdd/app-data/lnd/"
-  if ! [[ -L "/home/admin/.lnd" ]]; then
-    sudo rm -rf "/home/admin/.lnd"                # not a symlink.. delete it silently
-    ln -s /mnt/hdd/app-data/lnd/ /home/admin/.lnd # and create symlink
-  fi
-
-  echo "# make sure network (bitcoin/litecoin) RPC password is set correctly in lnd.conf"
-  source <(sudo cat /mnt/hdd/"${network}"/"${network}".conf 2>/dev/null | grep "rpcpass" | sed 's/^[a-z]*\./lnd/g')
-  if [ "${#rpcpassword}" -gt 0 ]; then
-    sudo sed -i 's/^"${network}"d.rpcpass=.*/"${network}"d.rpcpass="${rpcpassword}"/g' /mnt/hdd/lnd/lnd.conf 2>/dev/null
-  else
-    echo "# WARN: could not get value 'rpcpass' from network config (e.g. bitcoin.conf)"
-  fi
-
-  echo "# make sure LND conf is readable and symlinked"
-  sudo chmod 644 "/mnt/hdd/lnd/lnd.conf"
-  sudo chown bitcoin:bitcoin "/mnt/hdd/lnd/lnd.conf"
-  if ! [[ -L "/mnt/hdd/app-data/lnd/lnd.conf" ]]; then
-    sudo rm -rf "/mnt/hdd/app-data/lnd/lnd.conf"                # not a symlink.. delete it silently
-    sudo ln -s "/mnt/hdd/lnd/lnd.conf" "/mnt/hdd/app-data/lnd/lnd.conf"  # and create symlink
-  fi
-
-  echo "# make sure TLS certificate is readable and symlinked"
-  sudo chmod 644 "/mnt/hdd/lnd/tls.cert"
-  sudo chown bitcoin:bitcoin "/mnt/hdd/lnd/tls.cert"
-  if ! [[ -L "/mnt/hdd/app-data/lnd/tls.cert" ]]; then
-    sudo rm -rf "/mnt/hdd/app-data/lnd/tls.cert"                    # not a symlink.. delete it silently
-    sudo ln -s "/mnt/hdd/lnd/tls.cert" "/mnt/hdd/app-data/lnd/tls.cert"  # and create symlink
-  fi
-  
-  if [ "${LNBits}" = "on" ]; then
-    echo "# fix the macaroon for LNbits" 
-    # https://github.com/rootzoll/raspiblitz/pull/1156#issuecomment-623293240
-    sudo -u admin /home/admin/config.scripts/bonus.lnbits.sh write-macaroons
-  fi
+  sudo usermod -aG lndadmin admin
+  sudo usermod -aG bitcoin admin
+  sudo usermod -aG lndadmin bitcoin
   
 ###########################
 # Check Macaroons and fix missing
 ###########################
 elif [ "$1" = "check" ]; then
-  check_macaroons ${network} ${chain}
+  check_macaroons "${network}" "${chain}"
   if [ $missing -gt 0 ]; then
-    /home/admin/config.scrips/lnd.creds.sh reset keepold
+    /home/admin/config.scrips/lnd.credentials.sh reset "${CHAIN}" keepold
   fi
 
 ###########################

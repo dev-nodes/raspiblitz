@@ -11,66 +11,48 @@ fi
 
 # load config values
 source /home/admin/raspiblitz.info 2>/dev/null
-source /mnt/hdd/raspiblitz.conf 2>/dev/null
-if [ ${#network} -eq 0 ]; then
-  echo "FAIL - was not able to load config data / network"
-  exit 1
-fi
+source /mnt/hdd/app-data/raspiblitz.conf 2>/dev/null
 
-# make sure main "notify" setting is present (add with default if not)
-if ! grep -Eq "^notify=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notify=off" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+# write default values if no custum values in raspiblitz config yet
+if ! grep -Eq "^notifyMethod=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMethod "mail"
 fi
-
-# check all other settings and add if missing
-if ! grep -Eq "^notifyMethod=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMethod=mail" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailTo=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailTo "mail@example.com"
 fi
-
-# Mail
-if ! grep -Eq "^notifyMailTo=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailTo=mail@example.com" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailServer=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailServer "mail.example.com"
 fi
-
-if ! grep -Eq "^notifyMailServer=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailServer=mail.example.com" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailPort=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailPort "587"
 fi
-
-if ! grep -Eq "^notifyMailHostname=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailHostname=$(hostname)" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailHostname=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailHostname "${hostname}"
 fi
-
-if ! grep -Eq "^notifyMailFromAddress=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailFromAddress=rb@example.com" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailFromAddress=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailFromAddress "rb@example.com"
 fi
-
-if ! grep -Eq "^notifyMailFromName=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailFromName=\"RB User\"" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailFromName=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailFromName "RB User"
 fi
-
-if ! grep -Eq "^notifyMailUser=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailUser=username" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailUser=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailUser "username"
 fi
-
-if ! grep -Eq "^notifyMailPass=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailPass=password" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailPass=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailPass "password"
 fi
-
-if ! grep -Eq "^notifyMailEncrypt=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailEncrypt=off" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailEncrypt=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailEncrypt "off"
 fi
-
-if ! grep -Eq "^notifyMailToCert=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyMailToCert=/mnt/hdd/notify_mail_cert.pem" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyMailToCert=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyMailToCert "/mnt/hdd/notify_mail_cert.pem"
 fi
-
-# Ext
-if ! grep -Eq "^notifyExtCmd=.*" /mnt/hdd/raspiblitz.conf; then
-    echo "notifyExtCmd=/usr/bin/printf" | sudo tee -a /mnt/hdd/raspiblitz.conf >/dev/null
+if ! grep -Eq "^notifyExtCmd=.*" /mnt/hdd/app-data/raspiblitz.conf; then
+    /home/admin/config.scripts/blitz.conf.sh set notifyExtCmd "/usr/bin/printf"
 fi
 
 # reload settings
-source /mnt/hdd/raspiblitz.conf 2>/dev/null
+source /mnt/hdd/app-data/raspiblitz.conf 2>/dev/null
 
 
 ###################
@@ -79,37 +61,39 @@ source /mnt/hdd/raspiblitz.conf 2>/dev/null
 if [ "$1" = "1" ] || [ "$1" = "on" ]; then
   echo "switching the NOTIFY ON"
 
-  # install sstmp if not already present
-  if ! command -v ssmtp >/dev/null; then
-    sudo apt-get install -y ssmtp
+  # install mstmp if not already present
+  if ! command -v msmtp >/dev/null; then
+    [ -z "$(find -H /var/lib/apt/lists -maxdepth 0 -mtime -7)" ] && sudo apt-get update
+    sudo apt-get install -y msmtp
   fi
 
   # install python lib for smime into virtual env
+  sudo pip config set global.break-system-packages true
   sudo -H /usr/bin/python3 -m pip install smime
 
   # write ssmtp config
-  cat << EOF | sudo tee /etc/ssmtp/ssmtp.conf >/dev/null
-#
-# Config file for sSMTP sendmail
-#
-# The person who gets all mail for userids < 1000
-# Make this empty to disable rewriting.
-Root=${notifyMailTo}
+  cat << EOF | sudo tee /etc/msmtprc >/dev/null
+# Set default values for all following accounts.
+defaults
+tls on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
 
-# hostname of this system
-Hostname=${notifyMailHostname}
+account mail
+host ${notifyMailServer}
+port ${notifyMailPort}
+from ${notifyMailFromAddress}
+auth on
+user ${notifyMailUser}
+password ${notifyMailPass}
 
-# relay/smarthost server settings
-Mailhub=${notifyMailServer}
-AuthUser=${notifyMailUser}
-AuthPass=${notifyMailPass}
-UseSTARTTLS=YES
-FromLineOverride=YES
+# Set a default account
+account default : mail
+
 EOF
 
   # edit raspi blitz config
-  echo "editing /mnt/hdd/raspiblitz.conf"
-  sudo sed -i "s/^notify=.*/notify=on/g" /mnt/hdd/raspiblitz.conf
+  echo "editing /mnt/hdd/app-data/raspiblitz.conf"
+  /home/admin/config.scripts/blitz.conf.sh set notify "on"
   exit 0
 fi
 
@@ -120,8 +104,8 @@ fi
 if [ "$1" = "0" ] || [ "$1" = "off" ]; then
   echo "switching the NOTIFY OFF"
   # edit raspi blitz config
-  echo "editing /mnt/hdd/raspiblitz.conf"
-  sudo sed -i "s/^notify=.*/notify=off/g" /mnt/hdd/raspiblitz.conf
+  echo "editing /mnt/hdd/app-data/raspiblitz.conf"
+  /home/admin/config.scripts/blitz.conf.sh set notify "off"
   exit 0
 fi
 
@@ -131,29 +115,29 @@ fi
 ###################
 if [ "$1" = "send" ]; then
   # check if "notify" is enabled - if not exit
-  if ! grep -Eq "^notify=on" /mnt/hdd/raspiblitz.conf; then
-    echo "Notifications are NOT enabled in /mnt/hdd/raspiblitz.conf"
+  if ! grep -Eq "^notify=on" /mnt/hdd/app-data/raspiblitz.conf; then
+    echo "Notifications are NOT enabled in /mnt/hdd/app-data/raspiblitz.conf"
     exit 1
   fi
 
-  if ! command -v ssmtp >/dev/null; then
+  if ! command -v msmtp >/dev/null; then
     echo "please run \"on\" first"
     exit 1
   fi
 
   # now parse settings from config and use to send the message
   if [ "${notifyMethod}" = "ext" ]; then
-    /usr/bin/python3 /home/admin/XXsendNotification.py ext ${notifyExtCmd} "$2"
+    /usr/bin/python3 /home/admin/config.scripts/blitz.sendnotification.py ext ${notifyExtCmd} "$2"
   elif [ "${notifyMethod}" = "mail" ]; then
     if [ "${notifyMailEncrypt}" = "on" ]; then
-      /usr/bin/python3 /home/admin/XXsendNotification.py mail "${@:3}" --from-address "${notifyMailFromAddress}" --from-name "${notifyMailFromName}" --cert "${notifyMailToCert}" --encrypt ${notifyMailTo} "$2"
+      /usr/bin/python3 /home/admin/config.scripts/blitz.sendnotification.py mail --from-address "${notifyMailFromAddress}" --from-name "${notifyMailFromName}" --cert "${notifyMailToCert}" --encrypt ${notifyMailTo} "${@:3}" "$2"
     else
-      /usr/bin/python3 /home/admin/XXsendNotification.py mail "${@:3}" --from-address "${notifyMailFromAddress}" --from-name "${notifyMailFromName}" "${notifyMailTo}" "$2"
+      /usr/bin/python3 /home/admin/config.scripts/blitz.sendnotification.py mail --from-address "${notifyMailFromAddress}" --from-name "${notifyMailFromName}" "${notifyMailTo}" "${@:3}" "$2"
     fi
   elif [ "${notifyMethod}" = "slack" ]; then
-    /usr/bin/python3 /home/admin/XXsendNotification.py slack -h "$2"
+    /usr/bin/python3 /home/admin/config.scripts/blitz.sendnotification.py slack -h "$2"
   else
-    echo "unknown notification method - check /mnt/hdd/raspiblitz.conf"
+    echo "unknown notification method - check /mnt/hdd/app-data/raspiblitz.conf"
   fi
 
   exit 0

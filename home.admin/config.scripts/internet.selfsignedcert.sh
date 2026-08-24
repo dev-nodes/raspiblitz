@@ -1,41 +1,52 @@
+#!/bin/bash
+
 # script to create a self-signed SSL certificate
 
-echo ""
-echo "***"
-echo "installing Nginx"
-echo "***"
-echo ""
-sudo apt-get install -y nginx
-sudo /etc/init.d/nginx start 2>/dev/null
+# command info
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
+  echo "config script to create a self-signed SSL certificate"
+  echo "internet.selfsignedcert.sh [create|reset]"
+  exit 1
+fi
 
-# Only generate if there is none. Or Electrum will not connect if the cert changed.
-if [ -f /etc/ssl/certs/localhost.crt ] ; then
-  echo "A self-signed certificate is already present" 
-else
-  echo ""
-  echo "***"
-  echo "Create a self signed SSL certificate"
-  echo "***"
-  echo ""
-  
+# make sure /mnt/hdd/app-data exists
+if ! [ -d /mnt/hdd/app-data ]; then
+  echo "# internet.letsencrypt.sh - /mnt/hdd/app-data does not exist. Exiting."
+  exit 1
+fi
+
+CERT_DIR="/mnt/hdd/app-data/selfsignedcert"
+CERT_FILE="${CERT_DIR}/selfsigned.cert"
+
+create_self_signed_cert() {
+
+  sudo mkdir -p "${CERT_DIR}"
+  sudo chown -R bitcoin:bitcoin "${CERT_DIR}"
+  cd /mnt/hdd/app-data/selfsignedcert || exit 1
+
+  echo "# Create a self signed SSL certificate"
+  localip=$(hostname -I | awk '{print $1}')
+
+  sudo -u bitcoin openssl genrsa -out selfsigned.key 2048
   #https://www.humankode.com/ssl/create-a-selfsigned-certificate-for-nginx-in-5-minutes
   #https://stackoverflow.com/questions/8075274/is-it-possible-making-openssl-skipping-the-country-common-name-prompts
+
   echo "
 [req]
 prompt             = no
 default_bits       = 2048
-default_keyfile    = localhost.key
+default_keyfile    = selfsigned.key
 distinguished_name = req_distinguished_name
 req_extensions     = req_ext
 x509_extensions    = v3_ca
 
 [req_distinguished_name]
 C = US
-ST = California
-L = Los Angeles
-O = Our Company Llc
+ST = Texas
+L = Lightning Network
+O = RaspiBlitz
 #OU = Org Unit Name
-CN = Our Company Llc
+CN = RaspiBlitz
 #emailAddress = info@example.com
 
 [req_ext]
@@ -47,9 +58,51 @@ subjectAltName = @alt_names
 [alt_names]
 DNS.1   = localhost
 DNS.2   = 127.0.0.1
-" | tee localhost.conf
+DNS.3   = $localip
+" | sudo -u bitcoin tee localhost.conf
 
-  openssl req -x509 -nodes -days 1825 -newkey rsa:2048 -keyout localhost.key -out localhost.crt -config localhost.conf
-  sudo mv localhost.crt /etc/ssl/certs/localhost.crt
-  sudo mv localhost.key /etc/ssl/private/localhost.key
+  sudo -u bitcoin openssl req -new -x509 -sha256 -key selfsigned.key \
+    -out selfsigned.cert -days 3650 -config localhost.conf
+
+  # set permissions on cert & key
+  sudo chown -h admin:www-data $CERT_DIR/selfsigned.cert
+  sudo chown -h admin:www-data $CERT_DIR/selfsigned.key 
+
+  # reolad nginx
+  sudo systemctl reload nginx 2>/dev/null
+}
+
+check_certificate_validity() {
+  if openssl x509 -checkend 86400 -noout -in "${CERT_FILE}"; then
+    echo "# The certificate is valid for more than one day, keeping it."
+    return 0
+  else
+    echo "# The certificate is invalid, expired or will expire within a day. Regenerating."
+    return 1
+  fi
+}
+
+if [ "$1" = create ]; then
+  if [[ -f "${CERT_DIR}/selfsigned.cert" && -f "${CERT_DIR}/selfsigned.key" ]]; then
+    # if certificate exists, check if it is still valid
+    if ! check_certificate_validity; then
+      create_self_signed_cert
+    fi
+  else
+    # the certificate doesn't exist, so create it
+    create_self_signed_cert
+  fi
+  exit 0
 fi
+
+if [ "$1" = reset ]; then
+  echo "# Make sure the old certificate is not present"
+  sudo rm -f "${CERT_DIR}/selfsigned.cert"
+  sudo rm -f "${CERT_DIR}/selfsigned.key"
+  create_self_signed_cert
+  /home/admin/config.scripts/internet.letsencrypt.sh refresh-nginx-certs
+  exit 0
+fi
+
+echo "# FAIL - Unknown Parameter $1"
+exit 1

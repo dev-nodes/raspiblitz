@@ -2,61 +2,220 @@
 
 # Based on: https://gist.github.com/normandmickey/3f10fc077d15345fb469034e3697d0d0
 
+# https://github.com/btcpayserver/NBXplorer/tags
+NBXplorerVersion="v2.6.10"
+# https://github.com/btcpayserver/btcpayserver/releases
+BTCPayVersion="v2.4.2"
+
+# check who signed the release (person that published release)
+PGPsigner="nicolasdorier"
+PGPpubkeyLink="https://keybase.io/nicolasdorier/pgp_keys.asc"
+PGPpubkeyFingerprint="AB4CFA9895ACA0DBE27F6B346618763EF09186FE"
+# ---
+#PGPsigner="Kukks"
+#PGPpubkeyLink="https://github.com/${PGPsigner}.gpg"
+#PGPpubkeyFingerprint="8E5530D9D1C93097"
+# ---
+# PGPsigner="web-flow"
+# PGPpubkeyLink="https://github.com/web-flow.gpg"
+# PGPpubkeyFingerprint="B5690EEEBB952194"
+
+function DotNetInstall() {
+  echo "# install .NET"
+  # https://dotnet.microsoft.com/en-us/download/dotnet/10.0
+  sudo apt-get -y install libunwind8 gettext libssl-dev
+  cpu=$(uname -m)
+  if [ "${cpu}" = "aarch64" ]; then
+    binaryVersion="arm64"
+    dotNetdirectLink="https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.300/dotnet-sdk-10.0.300-linux-arm64.tar.gz"
+    dotNetChecksum="b503fe0cac8f8748d1ae67af40bc9157456cc0f93c8264e3bc52cc52a12fbbbc3a16e905d8528214f29337d7349859bb08de99b1e1406da92723b071b3f45ce5"
+  elif [ "${cpu}" = "x86_64" ]; then
+    binaryVersion="x64"
+    dotNetdirectLink="https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.300/dotnet-sdk-10.0.300-linux-x64.tar.gz"
+    dotNetChecksum="a0c404c1a2f85d70e32392ce297eb388c0310c519521b538a031a895469444c67f347d4f9ca1f8441f525967a89c9b75e2cd1676da486f95118cf4025c38d904"
+  else
+    echo "# FAIL! CPU (${cpu}) not supported."
+    echo "result='dotnet cpu not supported'"
+    exit 1
+  fi
+  dotNetName="dotnet-sdk-10.0.300-linux-${binaryVersion}.tar.gz"
+  sudo rm -f /home/btcpay/dotnet-sdk-*.tar.gz 2>/dev/null
+  sudo -u btcpay wget "${dotNetdirectLink}" -O "/home/btcpay/${dotNetName}"
+  # check binary is was not manipulated (checksum test)
+  actualChecksum=$(sha512sum /home/btcpay/${dotNetName} | cut -d " " -f1)
+  if [ "${actualChecksum}" != "${dotNetChecksum}" ]; then
+    echo "# FAIL # Downloaded ${dotNetName} not matching SHA512 checksum: ${dotNetChecksum}"
+    echo "result='dotnet wrong checksum'"
+    exit 1
+  fi
+  sudo rm -rf /home/btcpay/dotnet
+  sudo -u btcpay mkdir /home/btcpay/dotnet
+  sudo -u btcpay tar -xvf "/home/btcpay/${dotNetName}" -C /home/btcpay/dotnet
+  sudo rm -f /home/btcpay/*.tar.gz*
+  if ! grep -q "^DOTNET_CLI_TELEMETRY_OPTOUT=1$" /etc/environment; then
+    echo "DOTNET_CLI_TELEMETRY_OPTOUT=1" | sudo tee -a /etc/environment
+  fi
+}
+
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
-  echo "config script to switch BTCPay Server on or off"
-  echo "bonus.btcpayserver.sh [on|off|menu|write-tls-macaroon]"
+  echo "Config script to switch BTCPay Server on or off"
+  echo "bonus.btcpayserver.sh menu"
+  echo "bonus.btcpayserver.sh [install|uninstall]"
+  echo "bonus.btcpayserver.sh [on|off|menu|write-tls-macaroon|cln-lightning-rpc-access]"
+  echo "installs BTCPayServer $BTCPayVersion with NBXplorer $NBXplorerVersion"
+  echo "To update to the configured release versions run:"
+  echo "bonus.btcpayserver.sh update"
+  echo
   exit 1
 fi
 
-source /mnt/hdd/raspiblitz.conf
-# get cpu architecture
+source /mnt/hdd/app-data/raspiblitz.conf
+# get cpu architecture (checked with 'uname -m')
 source /home/admin/raspiblitz.info
+source <(/home/admin/_cache.sh get state)
+
+function NBXplorerConfig() {
+  # check the postgres database
+  if sudo -u postgres psql -c '\l' | grep nbxplorermainnet; then
+    echo "# nbxplorermainnet database already exists"
+  else
+    echo "# Generate the database for nbxplorer"
+    sudo -u postgres psql -c "CREATE DATABASE nbxplorermainnet TEMPLATE template0 LC_CTYPE 'C' LC_COLLATE 'C' ENCODING 'UTF8';"
+    sudo -u postgres psql -c "CREATE USER nbxplorer WITH ENCRYPTED PASSWORD 'raspiblitz';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE nbxplorermainnet TO nbxplorer;"
+    # for migrations
+    sudo -u postgres psql -d nbxplorermainnet -c "GRANT ALL PRIVILEGES ON SCHEMA public TO nbxplorer;"
+  fi
+
+  # https://docs.btcpayserver.org/Deployment/ManualDeploymentExtended/#4-create-a-configuration-file
+  echo
+  echo "# Getting RPC credentials from the bitcoin.conf"
+  RPC_USER=$(sudo cat /mnt/hdd/app-data/bitcoin/bitcoin.conf | grep rpcuser | cut -c 9-)
+  PASSWORD_B=$(sudo cat /mnt/hdd/app-data/bitcoin/bitcoin.conf | grep rpcpassword | cut -c 13-)
+  sudo -u btcpay mkdir -p /home/btcpay/.nbxplorer/Main
+  echo "\
+network=mainnet
+btcnodeendpoint=127.0.0.1:8336
+btc.rpc.user=${RPC_USER}
+btc.rpc.password=${PASSWORD_B}
+postgres=User ID=nbxplorer;Host=localhost;Port=5432;Application Name=nbxplorer;MaxPoolSize=20;Database=nbxplorermainnet;Password='raspiblitz';
+automigrate=1
+nomigrateevts=1
+" | sudo -u btcpay tee /home/btcpay/.nbxplorer/Main/settings.config
+  sudo chmod 600 /home/btcpay/.nbxplorer/Main/settings.config
+}
+
+function BtcPayConfig() {
+  # set thumbprint (remove colons and make lowercase)
+  FINGERPRINT=$(openssl x509 -noout -fingerprint -sha256 -inform pem -in /home/btcpay/.lnd/tls.cert | cut -d"=" -f2 | tr -d ':' | awk '{print tolower($0)}')
+  # set up postgres
+  if sudo -u postgres psql -c '\l' | grep btcpaymainnet; then
+    echo "# btcpaymainnet database already exists"
+  else
+    echo "# Generate the database for btcpay"
+    sudo -u postgres psql -c "CREATE DATABASE btcpaymainnet TEMPLATE template0 LC_CTYPE 'C' LC_COLLATE 'C' ENCODING 'UTF8';"
+    sudo -u postgres psql -c "CREATE USER btcpay WITH ENCRYPTED PASSWORD 'raspiblitz';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE btcpaymainnet TO btcpay;"
+    # for migrations
+    sudo -u postgres psql -d btcpaymainnet -c "GRANT ALL PRIVILEGES ON SCHEMA public TO btcpay;"
+  fi
+
+  echo "# Regenerate the btcpayserver settings (includes the LND TLS thumbprint)"
+  # https://docs.btcpayserver.org/Deployment/ManualDeploymentExtended/#3-create-a-configuration-file
+  sudo -u btcpay mkdir -p /home/btcpay/.btcpayserver/Main
+  echo "
+### Global settings ###
+network=mainnet
+
+### Server settings ###
+port=23000
+bind=127.0.0.1
+externalurl=https://$BTCPayDomain
+socksendpoint=127.0.0.1:9050
+
+### NBXplorer settings ###
+BTC.explorer.url=http://127.0.0.1:24444/
+BTC.lightning=type=lnd-rest;server=https://127.0.0.1:8080/;macaroonfilepath=/home/btcpay/admin.macaroon;certthumbprint=$FINGERPRINT
+
+### Database ###
+postgres=User ID=btcpay;Host=localhost;Port=5432;Application Name=btcpay;MaxPoolSize=20;Database=btcpaymainnet;Password='raspiblitz';
+explorer.postgres=User ID=nbxplorer;Host=localhost;Port=5432;Application Name=nbxplorer;MaxPoolSize=20;Database=nbxplorermainnet;Password='raspiblitz';
+" | sudo -u btcpay tee /home/btcpay/.btcpayserver/Main/settings.config
+}
+
+function BtcPayService() {
+  if sudo ls /mnt/hdd/app-data/.btcpayserver/Main/sqllite.db 1>/dev/null 2>&1; then
+    echo "# sqlite database exists - will be ignored after the migration to postgresql"
+    databaseOption=" -- --sqlitefile=sqllite.db"
+  else
+    echo "# sqlite database does not exist, using postgresql"
+    databaseOption=""
+  fi
+  # see the configuration options with:
+  # sudo -u btcpay /home/btcpay/dotnet/dotnet run --no-launch-profile --no-build -c Release --project "/home/btcpay/btcpayserver/BTCPayServer/BTCPayServer.csproj" -- -h
+  # run manually to debug:
+  # sudo -u btcpay /home/btcpay/dotnet/dotnet run --no-launch-profile --no-build -c Release --project "/home/btcpay/btcpayserver/BTCPayServer/BTCPayServer.csproj" -- --sqlitefile=sqllite.db
+  echo "# create the btcpayserver.service"
+  echo "
+[Unit]
+Description=BtcPayServer daemon
+Requires=nbxplorer.service
+After=nbxplorer.service
+
+[Service]
+ExecStart=/home/btcpay/dotnet/dotnet run --no-launch-profile --no-build \
+ -c Release --project \"/home/btcpay/btcpayserver/BTCPayServer/BTCPayServer.csproj\" ${databaseOption}
+User=btcpay
+Group=btcpay
+Type=simple
+PIDFile=/run/btcpayserver/btcpayserver.pid
+Restart=always
+RestartSec=10
+
+# Hardening measures
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target
+" | sudo tee /etc/systemd/system/btcpayserver.service
+  sudo systemctl daemon-reload
+}
 
 if [ "$1" = "status" ]; then
 
+  echo "version='${BTCPayVersion}'"
+
+  fatpack=$(compgen -u | grep -c btcpay)
+  echo "fatpack=${fatpack}"
+
+  isInstalled=$(compgen -u | grep -c btcpay)
+  echo "prepared=${isInstalled}"
+  isActive=$(sudo ls /etc/systemd/system/btcpayserver.service 2>/dev/null | grep -c 'btcpayserver.service')
+  echo "installed=${isActive}"
+
   if [ "${BTCPayServer}" = "on" ]; then
-
     echo "switchedon=1"
-    isInstalled=$(sudo ls /etc/systemd/system/btcpayserver.service 2>/dev/null | grep -c 'btcpayserver.service')
-    echo "installed=${isInstalled}"
-
-    localIP=$(ip addr | grep 'state UP' -A2 | egrep -v 'docker0' | grep 'eth0\|wlan0' | tail -n1 | awk '{print $2}' | cut -f1 -d'/')
+    localIP=$(hostname -I | awk '{print $1}')
     echo "localIP='${localIP}'"
+    echo "httpPort='23000'"
     echo "httpsPort='23001'"
+    echo "httpsForced='1'"
+    echo "httpsSelfsigned='1'" # TODO: change later if IP2Tor+LetsEncrypt is active
+    echo "authMethod='userdefined'"
     echo "publicIP='${publicIP}'"
-
-    # check for LetsEnryptDomain for DynDns
-    error=""
-    source <(sudo /home/admin/config.scripts/blitz.subscriptions.ip2tor.py ip-by-tor $publicIP)
-    if [ ${#error} -eq 0 ]; then
-      echo "publicDomain='${domain}'"
-    fi
 
     sslFingerprintIP=$(openssl x509 -in /mnt/hdd/app-data/nginx/tls.cert -fingerprint -noout 2>/dev/null | cut -d"=" -f2)
     echo "sslFingerprintIP='${sslFingerprintIP}'"
 
-    toraddress=$(sudo cat /mnt/hdd/tor/btcpay/hostname 2>/dev/null)
+    toraddress=$(sudo cat /mnt/hdd/app-data/tor/btcpay/hostname 2>/dev/null)
     echo "toraddress='${toraddress}'"
 
     sslFingerprintTOR=$(openssl x509 -in /mnt/hdd/app-data/nginx/tor_tls.cert -fingerprint -noout 2>/dev/null | cut -d"=" -f2)
     echo "sslFingerprintTOR='${sslFingerprintTOR}'"
-
-    # check for IP2TOR
-    error=""
-    source <(sudo /home/admin/config.scripts/blitz.subscriptions.ip2tor.py ip-by-tor $toraddress)
-    if [ ${#error} -eq 0 ]; then
-      echo "ip2torType='${ip2tor-v1}'"
-      echo "ip2torID='${id}'"
-      echo "ip2torIP='${ip}'"
-      echo "ip2torPort='${port}'"
-      # check for LetsEnryptDomain on IP2TOR
-      error=""
-      source <(sudo /home/admin/config.scripts/blitz.subscriptions.letsencrypt.py domain-by-ip $ip)
-      if [ ${#error} -eq 0 ]; then
-        echo "ip2torDomain='${domain}'"
-      fi
-    fi
 
     # check for error
     isDead=$(sudo systemctl status btcpayserver | grep -c 'inactive (dead)')
@@ -66,7 +225,6 @@ if [ "$1" = "status" ]; then
 
   else
     echo "switchedon=0"
-    echo "installed=0"
   fi
   exit 0
 fi
@@ -74,39 +232,50 @@ fi
 # show info menu
 if [ "$1" = "menu" ]; then
 
-  # get LNbits status info
+  # get status info
   echo "# collecting status info ... (please wait)"
   source <(sudo /home/admin/config.scripts/bonus.btcpayserver.sh status)
 
   if [ ${switchedon} -eq 0 ]; then
-      whiptail --title " BTCPay Server " --msgbox "BTCPay Server is not activated." 7 36
-      exit 0
+    whiptail --title " BTCPay Server " --msgbox "BTCPay Server is not activated." 7 36
+    exit 0
   fi
 
   if [ ${installed} -eq 0 ]; then
-      whiptail --title " BTCPay Server " --msgbox "BTCPay Server needs to be re-installed.\nPress OK to start process." 8 45
-      /home/admin/config.scripts/bonus.btcpayserver.sh on
-      exit 0
+    whiptail --title " BTCPay Server " --msgbox "BTCPay Server needs to be re-installed.\nPress OK to start process." 8 45
+    /home/admin/config.scripts/bonus.btcpayserver.sh on
+    exit 0
   fi
 
-  text="Local Webrowser: https://${localIP}:${httpsPort}"
+  # display possible problems with IP2TOR setup
+  if [ ${#ip2torWarn} -gt 0 ]; then
+    whiptail --title " Warning " \
+      --yes-button "Back" \
+      --no-button "Continue Anyway" \
+      --yesno "Your IP2TOR+LetsEncrypt may have problems:\n${ip2torWarn}\n\nCheck if locally responding: https://${localIP}:${httpsPort}\n\nCheck if service is reachable over Tor:\n${toraddress}" 14 72
+    if [ "$?" != "1" ]; then
+      exit 0
+    fi
+  fi
+
+  text="Local Web Browser: https://${localIP}:${httpsPort}"
 
   if [ ${#publicDomain} -gt 0 ]; then
-     text="${text}
+    text="${text}
 Public Domain: https://${publicDomain}:${httpsPort}
-port forwarding on router needs to be active & may change port" 
+port forwarding on router needs to be active & may change port"
   fi
 
   text="${text}
-SHA1 ${sslFingerprintIP}" 
+SHA1 ${sslFingerprintIP}"
 
   if [ "${runBehindTor}" = "on" ] && [ ${#toraddress} -gt 0 ]; then
-    /home/admin/config.scripts/blitz.lcd.sh qr "${toraddress}"
+    sudo /home/admin/config.scripts/blitz.display.sh qr "${toraddress}"
     text="${text}\n
-TOR Browser Hidden Service address (QR see LCD):
+Tor Browser Hidden Service address (see the QR onLCD):
 ${toraddress}"
   fi
-  
+
   if [ ${#ip2torDomain} -gt 0 ]; then
     text="${text}\n
 IP2TOR+LetsEncrypt: https://${ip2torDomain}:${ip2torPort}
@@ -119,242 +288,364 @@ go MAINMENU > SUBSCRIBE and add LetsEncrypt HTTPS Domain"
   elif [ ${#publicDomain} -eq 0 ]; then
     text="${text}\n
 To enable easy reachability with normal browser from the outside
-consider adding a IP2TOR Bridge (MAINMENU > SUBSCRIBE)."
+consider adding a IP2TOR Bridge: MAINMENU > SUBSCRIBE > IP2TOR"
   fi
 
-  whiptail --title " BTCPay Server " --msgbox "${text}" 15 69
-  
-  /home/admin/config.scripts/blitz.lcd.sh hide
-  echo "please wait ..."
-  exit 0
-fi
+  text="${text}\n
+To get the 'Connection String' to activate Lightning Payments:
+MAINMENU > CONNECT > BTCPay Server"
 
-# add default values to raspi config if needed
-if ! grep -Eq "^BTCPayServer=" /mnt/hdd/raspiblitz.conf; then
-  echo "BTCPayServer=off" >> /mnt/hdd/raspiblitz.conf
-fi
-if ! grep -Eq "^BTCPayDomain=" /mnt/hdd/raspiblitz.conf; then
-  echo "BTCPayDomain=off" >> /mnt/hdd/raspiblitz.conf
+  whiptail --title " BTCPay Server " --yes-button "OK" --no-button "OPTIONS" --yesno "${text}" 17 69
+  result=$?
+  sudo /home/admin/config.scripts/blitz.display.sh hide
+  echo "# please wait ..."
+
+  # exit when user presses OK to close menu
+  if [ ${result} -eq 0 ]; then
+    exit 0
+  fi
+
+  OPTIONS=()
+  # Backup database
+  OPTIONS+=(BACKUP "Backup database")
+  if [ -d /mnt/hdd/app-data/backup ]; then
+    OPTIONS+=(RESTORE "Restore database")
+  fi
+
+  WIDTH=66
+  CHOICE_HEIGHT=$(("${#OPTIONS[@]}/2+1"))
+  HEIGHT=$((CHOICE_HEIGHT + 7))
+  CHOICE=$(dialog --clear \
+    --title " BTCPayServer - Options" \
+    --ok-label "Select" \
+    --cancel-label "Back" \
+    --menu "Choose one of the following options:" \
+    $HEIGHT $WIDTH $CHOICE_HEIGHT \
+    "${OPTIONS[@]}" \
+    2>&1 >/dev/tty)
+
+  case $CHOICE in
+  BACKUP)
+    clear
+    /home/admin/config.scripts/bonus.btcpayserver.sh backup
+    echo
+    echo "Backup done"
+    echo "PRESS ENTER to continue"
+    read -r
+    exit 0
+    ;;
+  RESTORE)
+    clear
+    # check if backup exist
+
+    backup_target="/mnt/hdd/app-data/backup/btcpaymainnet"
+    backup_file=$(ls -t $backup_target/*.sql | head -n1)
+
+    if [ "$backup_file" = "" ]; then
+      echo "ABORT - No Backup found to restore from"
+      exit 1
+    else
+      # build dialog to choose backup file from menu
+      OPTIONS_RESTORE=()
+
+      counter=0
+      cd $backup_target || exit 1
+      for f in $(find *.* -maxdepth 1 -type f); do
+        [[ -f "$f" ]] || continue
+        counter=$(($counter + 1))
+        OPTIONS_RESTORE+=($counter "$f")
+      done
+
+      WIDTH_RESTORE=66
+      CHOICE_HEIGHT_RESTORE=$(("${#OPTIONS_RESTORE[@]}/2+1"))
+      HEIGHT_RESTORE=$((CHOICE_HEIGHT_RESTORE + 7))
+      CHOICE_RESTORE=$(dialog --clear \
+        --title "BTCPayServer - Backup restore" \
+        --ok-label "Select" \
+        --cancel-label "Back" \
+        --menu "Choose one of the following backups:" \
+        $HEIGHT_RESTORE $WIDTH_RESTORE $CHOICE_HEIGHT_RESTORE \
+        "${OPTIONS_RESTORE[@]}" \
+        2>&1 >/dev/tty)
+
+      # start restore with selected backup
+      clear
+      if [ "$CHOICE_RESTORE" != "" ]; then
+        backup_file=${backup_target}/${OPTIONS_RESTORE[$(($CHOICE_RESTORE * 2 - 1))]}
+        /home/admin/config.scripts/bonus.btcpayserver.sh restore "${backup_file}"
+        echo
+        echo "Restore done"
+        echo "PRESS ENTER to continue"
+        read -r
+      fi
+      exit 0
+    fi
+    ;;
+  *)
+    clear
+    exit 0
+    ;;
+  esac
+
+  exit 0
 fi
 
 # write-tls-macaroon
 if [ "$1" = "write-tls-macaroon" ]; then
 
-  echo "make sure btcpay is member of lndadmin"
+  echo "# make sure btcpay is member of lndadmin"
   sudo /usr/sbin/usermod --append --groups lndadmin btcpay
 
-  echo "make sure symlink to central app-data directory exists"
+  echo "# make sure symlink to central app-data directory exists"
   if ! [[ -L "/home/btcpay/.lnd" ]]; then
-    sudo rm -rf "/home/btcpay/.lnd"                          # not a symlink.. delete it silently
-    sudo ln -s "/mnt/hdd/app-data/lnd/" "/home/btcpay/.lnd"  # and create symlink
+    sudo rm -rf "/home/btcpay/.lnd"                         # not a symlink.. delete it silently
+    sudo ln -s "/mnt/hdd/app-data/lnd/" "/home/btcpay/.lnd" # and create symlink
   fi
 
   # copy admin macaroon
-  echo "extra symlink to admin.macaroon for btcpay"
+  echo "# extra symlink to admin.macaroon for btcpay"
   if ! [[ -L "/home/btcpay/admin.macaroon" ]]; then
     sudo ln -s "/home/btcpay/.lnd/data/chain/${network}/${chain}net/admin.macaroon" "/home/btcpay/admin.macaroon"
   fi
 
-  # set thumbprint
-  FINGERPRINT=$(openssl x509 -noout -fingerprint -sha256 -inform pem -in /home/btcpay/.lnd/tls.cert | cut -d"=" -f2)
-  doesNetworkEntryAlreadyExists=$(sudo cat /home/btcpay/.btcpayserver/Main/settings.config | grep -c '^network=')
-  if [ ${doesNetworkEntryAlreadyExists} -eq 0 ]; then
-    echo "setting the LND TLS thumbprint for BTCPay"
-    echo "
-### Global settings ###
-network=mainnet
+  BtcPayConfig
 
-### Server settings ###
-port=23000
-bind=127.0.0.1
-externalurl=https://$BTCPayDomain
-
-### NBXplorer settings ###
-BTC.explorer.url=http://127.0.0.1:24444/
-BTC.lightning=type=lnd-rest;server=https://127.0.0.1:8080/;macaroonfilepath=/home/btcpay/admin.macaroon;certthumbprint=$FINGERPRINT
-" | sudo -u btcpay tee -a /home/btcpay/.btcpayserver/Main/settings.config
-  else
-    echo "setting new LND TLS thumbprint for BTCPay"
-    s="BTC.lightning=type=lnd-rest\;server=https\://127.0.0.1:8080/\;macaroonfilepath=/home/btcpay/admin.macaroon\;"
-    sudo -u btcpay sed -i "s|^${s}certthumbprint=.*|${s}certthumbprint=$FINGERPRINT|g" /home/btcpay/.btcpayserver/Main/settings.config
-  fi
-  
   if [ "${state}" == "ready" ]; then
     sudo systemctl restart btcpayserver
   fi
   exit 0
 fi
 
-# switch on
-if [ "$1" = "1" ] || [ "$1" = "on" ]; then
-  echo "*** INSTALL BTCPAYSERVER ***"
+# cln-lightning-rpc-access
+if [ "$1" = "cln-lightning-rpc-access" ]; then
+  if [ "${cl}" = "on" ]; then
+    source <(/home/admin/config.scripts/network.aliases.sh getvars cl mainnet)
 
-  ##################
-  # NGINX
-  ##################
+    if [ $(grep -c "^rpc-file-mode=0660" <${CLCONF}) -eq 0 ]; then
+      echo "rpc-file-mode=0660" | tee -a ${CLCONF}
+      if [ "${state}" == "ready" ]; then
+        sudo systemctl restart lightningd
+      fi
+    fi
+
+    echo "# make sure btcpay is member of the bitcoin group"
+    sudo /usr/sbin/usermod --append --groups bitcoin btcpay
+
+    if [ "${state}" == "ready" ]; then
+      sudo systemctl restart btcpayserver
+    fi
+  else
+    echo "# Install CLN first"
+    exit 1
+  fi
+
+  echo "
+In the BTCPayServer Lightning Wallet settings 'Connect to a Lightning node' page
+fill in the 'Connection configuration for your custom Lightning node:' box on with:
+
+type=clightning;server=unix:///home/bitcoin/.lightning/bitcoin/lightning-rpc
+"
+  exit 0
+fi
+
+########################################
+# INSTALL (just user, code & compile)
+########################################
+
+if [ "$1" = "install" ]; then
+
+  # check if code is already installed
+  isInstalled=$(compgen -u | grep -c btcpay)
+  if [ "${isInstalled}" != "0" ]; then
+    echo "# already installed"
+    exit 0
+  fi
+
+  echo "# create btcpay user"
+  sudo adduser --system --group --home /home/btcpay btcpay
+  cd /home/btcpay || exit 1
+
+  DotNetInstall
+
+  # NBXplorer
+  echo "# Install NBXplorer $NBXplorerVersion"
+  cd /home/btcpay || exit 1
+  echo "# Download the NBXplorer source code $NBXplorerVersion"
+  sudo -u btcpay git clone https://github.com/btcpayserver/NBXplorer.git
+  if [ ! -d "/home/btcpay/NBXplorer" ]; then
+    echo "# FAIL! on first git clone - retrying with snapshot download."
+    sudo -u btcpay curl -L https://github.com/btcpayserver/NBXplorer/archive/refs/tags/$NBXplorerVersion.tar.gz -o NBXplorer.tar.gz
+    sudo -u btcpay tar -xzvf NBXplorer.tar.gz
+    sudo -u btcpay mv NBXplorer-* NBXplorer
+    if [ ! -d "/home/btcpay/NBXplorer" ]; then
+      echo "# FAIL! also on second git clone of NBXplorer - uninstall & exiting."
+      /home/admin/config.scripts/bonus.btcpayserver.sh uninstall
+      exit 1
+    fi
+    cd NBXplorer
+  else
+    echo "# OK - git clone of NBXplorer successful."
+    cd NBXplorer
+    sudo -u btcpay git reset --hard $NBXplorerVersion
+  fi
+  # PGP verify
+  NBXPGPsigner="nicolasdorier"
+  NBXPGPpubkeyLink="https://keybase.io/nicolasdorier/pgp_keys.asc"
+  NBXPGPpubkeyFingerprint="AB4CFA9895ACA0DBE27F6B346618763EF09186FE"
+  sudo -u btcpay /home/admin/config.scripts/blitz.git-verify.sh "${NBXPGPsigner}" "${NBXPGPpubkeyLink}" "${NBXPGPpubkeyFingerprint}" || exit 1
+  echo "# Build NBXplorer $NBXplorerVersion"
+  # from the build.sh with path
+  sudo -u btcpay /home/btcpay/dotnet/dotnet build -c Release NBXplorer/NBXplorer.csproj || exit 1
+
+  # BTCPayServer
+  echo "# Install BTCPayServer"
+  cd /home/btcpay || exit 1
+  echo "# Download the BTCPayServer source code $BTCPayVersion"
+  sudo -u btcpay git clone https://github.com/btcpayserver/btcpayserver.git 2>/dev/null
+  cd btcpayserver || exit 1
+  sudo -u btcpay git reset --hard $BTCPayVersion
+
+  echo "# verify signature of ${PGPsigner}"
+  if ! sudo -u btcpay /home/admin/config.scripts/blitz.git-verify.sh "${PGPsigner}" "${PGPpubkeyLink}" "${PGPpubkeyFingerprint}"; then
+    # try with webflow
+    sudo -u btcpay /home/admin/config.scripts/blitz.git-verify.sh "web-flow" "https://github.com/web-flow.gpg" "B5690EEEBB952194" || exit 1
+  fi
+
+  echo "# Build BTCPayServer $BTCPayVersion"
+  # from the build.sh with path
+  sudo -u btcpay /home/btcpay/dotnet/dotnet build -c Release \
+    /home/btcpay/btcpayserver/BTCPayServer/BTCPayServer.csproj || exit 1
+  exit 0
+fi
+
+########################################
+# UNINSTALL (remove from system)
+########################################
+
+if [ "$1" = "uninstall" ]; then
+
+  isActive=$(sudo ls /etc/systemd/system/btcpayserver.service 2>/dev/null | grep -c 'btcpayserver.service')
+  if [ "${isActive}" != "0" ]; then
+    echo "# cannot uninstall if still 'on'"
+    exit 1
+  fi
+
+  # clear dotnet cache
+  /home/btcpay/dotnet/dotnet nuget locals all --clear 2>/dev/null
+
+  # remove dotnet
+  sudo rm -rf /usr/share/dotnet 2>/dev/null
+
+  # nuke user
+  sudo userdel -rf btcpay 2>/dev/null
+
+  echo "# uninstall done"
+
+  exit 0
+fi
+
+########################################
+# ON (activate & config)
+########################################
+
+if [ "$1" = "1" ] || [ "$1" = "on" ]; then
+
+  # check if already active
+  isActive=$(sudo ls /etc/systemd/system/btcpayserver.service 2>/dev/null | grep -c 'btcpayserver.service')
+  if [ "${isActive}" != "0" ]; then
+    echo "result='already active'"
+    exit 1
+  fi
+
+  # check if code is already installed
+  isInstalled=$(compgen -u | grep -c btcpay)
+  if [ "${isInstalled}" == "0" ]; then
+    echo "# Installing code base & dependencies first .."
+    /home/admin/config.scripts/bonus.btcpayserver.sh install || exit 1
+  fi
+
+  echo "# ACTIVATE BTCPAYSERVER"
+
+  echo "# install postreSQL"
+  sudo /home/admin/config.scripts/bonus.postgresql.sh on || exit 1
+
   # setup nginx symlinks
   if ! [ -f /etc/nginx/sites-available/btcpay_ssl.conf ]; then
-     sudo cp /home/admin/assets/nginx/sites-available/btcpay_ssl.conf /etc/nginx/sites-available/btcpay_ssl.conf
+    sudo cp /home/admin/assets/nginx/sites-available/btcpay_ssl.conf /etc/nginx/sites-available/btcpay_ssl.conf
   fi
   if ! [ -f /etc/nginx/sites-available/btcpay_tor.conf ]; then
-     sudo cp /home/admin/assets/nginx/sites-available/btcpay_tor.conf /etc/nginx/sites-available/btcpay_tor.conf
+    sudo cp /home/admin/assets/nginx/sites-available/btcpay_tor.conf /etc/nginx/sites-available/btcpay_tor.conf
   fi
   if ! [ -f /etc/nginx/sites-available/btcpay_tor_ssl.conf ]; then
-     sudo cp /home/admin/assets/nginx/sites-available/btcpay_tor_ssl.conf /etc/nginx/sites-available/btcpay_tor_ssl.conf
+    sudo cp /home/admin/assets/nginx/sites-available/btcpay_tor_ssl.conf /etc/nginx/sites-available/btcpay_tor_ssl.conf
   fi
   sudo ln -sf /etc/nginx/sites-available/btcpay_ssl.conf /etc/nginx/sites-enabled/
   sudo ln -sf /etc/nginx/sites-available/btcpay_tor.conf /etc/nginx/sites-enabled/
   sudo ln -sf /etc/nginx/sites-available/btcpay_tor_ssl.conf /etc/nginx/sites-enabled/
   sudo nginx -t
   sudo systemctl reload nginx
-  
+
   # open the firewall
-  echo "*** Updating Firewall ***"
+  echo "# Updating the firewall"
   sudo ufw allow 23000 comment 'allow BTCPay HTTP'
   sudo ufw allow 23001 comment 'allow BTCPay HTTPS'
-  echo ""
+  echo
 
   # Hidden Service for BTCPay if Tor is active
   if [ "${runBehindTor}" = "on" ]; then
-    # make sure to keep in sync with internet.tor.sh script
-    /home/admin/config.scripts/internet.hiddenservice.sh btcpay 80 23002 443 23003
+    # make sure to keep in sync with tor.network.sh script
+    /home/admin/config.scripts/tor.onion-service.sh btcpay 80 23002 443 23003
   fi
 
   # check for $BTCPayDomain
-  source /mnt/hdd/raspiblitz.conf
+  source /mnt/hdd/app-data/raspiblitz.conf
+  if [ "${BTCPayDomain}" == "off" ]; then
+    BTCPayDomain=""
+  fi
 
   # stop services
-  echo "making sure services are not running"
+  echo "# making sure services are not running"
   sudo systemctl stop nbxplorer 2>/dev/null
   sudo systemctl stop btcpayserver 2>/dev/null
 
-  isInstalled=$(sudo ls /etc/systemd/system/btcpayserver.service 2>/dev/null | grep -c 'btcpayserver.service')
-  if [ ${isInstalled} -eq 0 ]; then
-    # create btcpay user
-    sudo adduser --disabled-password --gecos "" btcpay 2>/dev/null
-    cd /home/btcpay
+  cd /home/btcpay || exit 1
 
-    # store BTCpay data on HDD
-    sudo mkdir /mnt/hdd/app-data/.btcpayserver 2>/dev/null
+  # store BTCpay data on HDD
+  sudo mkdir /mnt/hdd/app-data/.btcpayserver 2>/dev/null
 
-    # move old btcpay data to app-data
-    sudo mv -f /mnt/hdd/.btcpayserver/* /mnt/hdd/app-data/.btcpayserver/ 2>/dev/null
-    sudo rm -rf /mnt/hdd/.btcpayserver 2>/dev/null
+  # move old btcpay data to app-data
+  sudo mv -f /mnt/hdd/.btcpayserver/* /mnt/hdd/app-data/.btcpayserver/ 2>/dev/null
+  sudo rm -rf /mnt/hdd/.btcpayserver 2>/dev/null
 
-    sudo chown -R btcpay:btcpay /mnt/hdd/app-data/.btcpayserver
-    sudo ln -s /mnt/hdd/app-data/.btcpayserver /home/btcpay/ 2>/dev/null
-    sudo chown -R btcpay:btcpay /home/btcpay/.btcpayserver
+  sudo chown -R btcpay:btcpay /mnt/hdd/app-data/.btcpayserver
+  sudo ln -s /mnt/hdd/app-data/.btcpayserver /home/btcpay/ 2>/dev/null
+  sudo chown -R btcpay:btcpay /home/btcpay/.btcpayserver
 
-    echo ""
-    echo "***"
-    echo "Installing .NET"
-    echo "***"
-    echo ""
-
-    # download dotnet-sdk
-    # https://dotnet.microsoft.com/download/dotnet-core/3.1
-    # dependencies
-    sudo apt-get -y install libunwind8 gettext libssl1.0
-    
-    if [ "${cpu}" = "arm" ]; then
-      binaryVersion="arm"
-      dotNetdirectLink="https://download.visualstudio.microsoft.com/download/pr/f2e1cb4a-0c70-49b6-871c-ebdea5ebf09d/acb1ea0c0dbaface9e19796083fe1a6b/dotnet-sdk-3.1.300-linux-arm.tar.gz"
-      dotNetChecksum="510de2931522633e5a35cfbaebac255704bb2a282e4980e7597c924531564b1a2f769cf67b3d1f196442ceca3d0d9a53e0a6dcb12adc9b0c6c1500742e7b1ee5"
-    elif [ "${cpu}" = "aarch64" ]; then
-      binaryVersion="arm64"
-      dotNetdirectLink="https://download.visualstudio.microsoft.com/download/pr/e5e70860-a6d4-48cf-b0d1-eeba32657d80/2da3c605aaa65c7e4ac2ad0507a2e429/dotnet-sdk-3.1.300-linux-arm64.tar.gz"
-      dotNetChecksum="b1d806dd719e61ae27297515d26e6ef12e615da131db4fd1c29b2acc4d6a68a6b0e4ce94ead4f8f737c203328d596422068c78495eba331a5759f595ed9ed149"
-    elif [ "${cpu}" = "x86_64" ]; then
-      binaryVersion="x64"
-      dotNetdirectLink="https://download.visualstudio.microsoft.com/download/pr/0c795076-b679-457e-8267-f9dd20a8ca28/02446ea777b6f5a5478cd3244d8ed65b/dotnet-sdk-3.1.300-linux-x64.tar.gz"
-      dotNetChecksum="1c3844ea5f8847d92372dae67529ebb08f09999cac0aa10ace571c63a9bfb615adbf8b9d5cebb2f960b0a81f6a5fba7d80edb69b195b77c2c7cca174cbc2fd0b"
-    fi
-
-    dotNetName="dotnet-sdk-3.1.300-linux-${binaryVersion}.tar.gz"
-    sudo rm /home/btcpay/${dotnetName} 2>/dev/null
-    sudo -u btcpay wget "${dotNetdirectLink}"
-    # check binary is was not manipulated (checksum test)
-    actualChecksum=$(sha512sum /home/btcpay/${dotNetName} | cut -d " " -f1)
-    if [ "${actualChecksum}" != "${dotNetChecksum}" ]; then
-      echo "!!! FAIL !!! Downloaded ${dotNetName} not matching SHA512 checksum: ${dotNetChecksum}"
-      exit 1
-    fi
-
-    # download aspnetcore-runtime
-    if [ "${cpu}" = "arm" ]; then
-      AspNetdirectLink="https://download.visualstudio.microsoft.com/download/pr/06f9feeb-cd19-49e9-a5cd-a230e1d8c52f/a232fbb4a6e6a90bbe624225e180308a/aspnetcore-runtime-3.1.4-linux-arm.tar.gz"
-      AspNetChecksum="58fe16baf370cebda96b93735be9bc57cf9a846b56ecbdc3c745c83399ad5b59518251996b75ac959ee3a8eb438a92e2ea3d088af4f0631caed3c86006d4ed2d"
-    elif [ "${cpu}" = "aarch64" ]; then
-      AspNetdirectLink="https://download.visualstudio.microsoft.com/download/pr/0f94ccdf-a791-4978-a0e1-0309911f60a4/d734c7f79e6b180b7b91f3d7e78d24d8/aspnetcore-runtime-3.1.4-linux-arm64.tar.gz"
-      AspNetChecksum="db91ea66e796e3d27ee08d50cb0532d1fb74060d5a8f1c90d2f34cb66ad74d50d6a8d128457693c15216b3c94d6c1acb7bd342fe0a0fa770117e21211972abda"
-    elif [ "${cpu}" = "x86_64" ]; then
-      AspNetdirectLink="https://download.visualstudio.microsoft.com/download/pr/a1ddc998-933c-47af-b8c7-dc2503e44e91/42d8cd08b2055df52c9457c993911f2e/aspnetcore-runtime-3.1.4-linux-x64.tar.gz"
-      AspNetChecksum="a761fd3652a0bc838c33b2846724d21e82410a5744bd37cbfab96c60327c89ee89c177e480a519b0e0d62ee58ace37e2c2a4b12b517e5eb0af601ad9804e028f"
-    fi
-
-    aspNetCoreName="aspnetcore-runtime-3.1.4-linux-${binaryVersion}.tar.gz"
-    sudo rm /home/btcpay/${aspNetCoreName} 2>/dev/null
-    sudo -u btcpay wget "${AspNetdirectLink}"
-    # check binary is was not manipulated (checksum test)
-    actualAspNetChecksum=$(sha512sum /home/btcpay/${aspNetCoreName} | cut -d " " -f1)
-    if [ "${actualAspNetChecksum}" != "${AspNetChecksum=}" ]; then
-      echo "!!! FAIL !!! Downloaded ${aspNetCoreName} not matching SHA512 checksum: ${AspNetChecksum=}"
-      exit 1
-    fi
-
-    sudo -u btcpay mkdir /home/btcpay/dotnet
-    sudo -u btcpay tar -xvf ${dotNetName} -C /home/btcpay/dotnet
-    sudo -u btcpay tar -xvf ${aspNetCoreName} -C /home/btcpay/dotnet
-    sudo rm -f *.tar.gz*
-
-    # opt out of telemetry
-    echo "DOTNET_CLI_TELEMETRY_OPTOUT=1" | sudo tee -a /etc/environment
-
-    # make .NET accessible and add to PATH
-    sudo ln -s /home/btcpay/dotnet /usr/share
-    export PATH=$PATH:/usr/share
-    if [ $(cat /etc/profile | grep -c "/usr/share") -eq 0 ]; then
-      sudo bash -c "echo 'PATH=\$PATH:/usr/share' >> /etc/profile"
-    fi
-    export DOTNET_ROOT=/home/btcpay/dotnet
-    export PATH=$PATH:/home/btcpay/dotnet
-    if [ $(cat /etc/profile | grep -c "DOTNET_ROOT") -eq 0 ]; then
-      sudo bash -c "echo 'DOTNET_ROOT=/home/btcpay/dotnet' >> /etc/profile"
-      sudo bash -c "echo 'PATH=\$PATH:/home/btcpay/dotnet' >> /etc/profile"
-    fi
-    sudo -u btcpay /home/btcpay/dotnet/dotnet --info
-
-    # NBXplorer
-    echo ""
-    echo "***"
-    echo "Install NBXplorer"
-    echo "***"
-    echo ""
-
-    cd /home/btcpay
-    echo "Downloading NBXplorer source code.."
-    sudo -u btcpay git clone https://github.com/dgarage/NBXplorer.git 2>/dev/null
-    cd NBXplorer
-    # check https://github.com/dgarage/NBXplorer/releases
-    sudo -u btcpay git reset --hard v2.1.34
-    # from the build.sh with path
-    sudo -u btcpay /home/btcpay/dotnet/dotnet build -c Release NBXplorer/NBXplorer.csproj
-
-    # create nbxplorer service
-    echo "
+  ## see the configuration options with:
+  # sudo -u btcpay /home/btcpay/dotnet/dotnet run --no-launch-profile --no-build -c Release --project "NBXplorer/NBXplorer.csproj" -c /home/btcpay/.nbxplorer/Main/settings.config -h
+  ##sudo systenmct run manually to debug:
+  # sudo su - btcpay
+  # cd NBXplorer
+  # /home/btcpay/dotnet/dotnet run --no-launch-profile --no-build -c Release --project "NBXplorer/NBXplorer.csproj" -- $@
+  echo "# create the nbxplorer.service"
+  echo "
 [Unit]
 Description=NBXplorer daemon
 Requires=bitcoind.service
 After=bitcoind.service
 
 [Service]
-ExecStart=/home/btcpay/dotnet/dotnet \"/home/btcpay/NBXplorer/NBXplorer/bin/Release/netcoreapp3.1/NBXplorer.dll\" -c /home/btcpay/.nbxplorer/Main/settings.config
+WorkingDirectory=/home/btcpay/NBXplorer
+ExecStart=/home/btcpay/dotnet/dotnet run --no-launch-profile --no-build \
+ -c Release --project \"NBXplorer/NBXplorer.csproj\" -- \$@
 User=btcpay
 Group=btcpay
 Type=simple
 PIDFile=/run/nbxplorer/nbxplorer.pid
 Restart=on-failure
+RestartSec=20
 
+# Hardening measures
 PrivateTmp=true
 ProtectSystem=full
 NoNewPrivileges=true
@@ -364,129 +655,98 @@ PrivateDevices=true
 WantedBy=multi-user.target
 " | sudo tee /etc/systemd/system/nbxplorer.service
 
-    sudo systemctl daemon-reload
-    # start to create settings.config
-    sudo systemctl enable nbxplorer
+  sudo systemctl daemon-reload
+  # start to create settings.config
+  sudo systemctl enable nbxplorer
 
-    if [ "${state}" == "ready" ]; then
-      echo "Starting nbxplorer"
-      sudo systemctl start nbxplorer
-      echo "Checking for nbxplorer config"
-      while [ ! -f "/home/btcpay/.nbxplorer/Main/settings.config" ]
-       do
-         echo "Waiting for nbxplorer to start - CTRL+C to abort"
-         sleep 10
-         hasFailed=$(sudo systemctl status nbxplorer | grep -c "Active: failed")
-         if [ ${hasFailed} -eq 1 ]; then
-           echo "seems like starting nbxplorer service has failed - see: systemctl status nbxplorer"
-           echo "maybe report here: https://github.com/rootzoll/raspiblitz/issues/214"
-         fi
-      done
-    else
-      echo "Because the system is not 'ready' the service 'nbxplorer' will not be started at this point .. its enabled and will start on next reboot"
-    fi
-
-    echo ""
-    echo "***"
-    echo "getting RPC credentials from the bitcoin.conf"
-    RPC_USER=$(sudo cat /mnt/hdd/bitcoin/bitcoin.conf | grep rpcuser | cut -c 9-)
-    PASSWORD_B=$(sudo cat /mnt/hdd/bitcoin/bitcoin.conf | grep rpcpassword | cut -c 13-)
-    #sudo mv /home/btcpay/.nbxplorer/Main/settings.config /home/btcpay/.nbxplorer/Main/settings.config.backup
-    sudo -u btcpay mkdir -p /home/btcpay/.nbxplorer/Main
-    touch /home/admin/settings.config
-    sudo chmod 600 /home/admin/settings.config || exit 1
-    cat >> /home/admin/settings.config <<EOF
-btc.rpc.user=raspibolt
-btc.rpc.password=$PASSWORD_B
-EOF
-
-    sudo mv /home/admin/settings.config /home/btcpay/.nbxplorer/Main/settings.config
-    sudo chown btcpay:btcpay /home/btcpay/.nbxplorer/Main/settings.config
-
-    if [ "${state}" == "ready" ]; then
-      sudo systemctl restart nbxplorer
-    fi  
-
-    # BTCPayServer
-    echo ""
-    echo "***"
-    echo "Install BTCPayServer"
-    echo "***"
-    echo ""
-
-    cd /home/btcpay
-    echo "Downloading BTCPayServer source code.."
-    sudo -u btcpay git clone https://github.com/btcpayserver/btcpayserver.git 2>/dev/null
-    cd btcpayserver
-    # check https://github.com/btcpayserver/btcpayserver/releases
-    sudo -u btcpay git reset --hard v1.0.5.2
-    # use latest commit (v1.0.4.4+) to fix build with latest dotNet
-    # sudo -u btcpay git checkout f2bb24f6ab6d402af8214c67f84e08116eb650e7
-    # from the build.sh with path
-    sudo -u btcpay /home/btcpay/dotnet/dotnet build -c Release /home/btcpay/btcpayserver/BTCPayServer/BTCPayServer.csproj
-
-    # create btcpayserver service
-    echo "
-[Unit]
-Description=BtcPayServer daemon
-Requires=btcpayserver.service
-After=nbxplorer.service
-
-[Service]
-ExecStart=/home/btcpay/dotnet/dotnet run --no-launch-profile --no-build -c Release -p \"/home/btcpay/btcpayserver/BTCPayServer/BTCPayServer.csproj\" -- \$@
-User=btcpay
-Group=btcpay
-Type=simple
-PIDFile=/run/btcpayserver/btcpayserver.pid
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-" | sudo tee /etc/systemd/system/btcpayserver.service
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable btcpayserver
-
-   if [ "${state}" == "ready" ]; then
-      echo "Starting btcpayserver"
-      sudo systemctl start btcpayserver
-      echo "Checking for btcpayserver config"
-      while [ ! -f "/home/btcpay/.btcpayserver/Main/settings.config" ]
-       do
-          echo "Waiting for btcpayserver to start - CTRL+C to abort"
-          sleep 10
-          hasFailed=$(sudo systemctl status btcpayserver  | grep -c "Active: failed")
-          if [ ${hasFailed} -eq 1 ]; then
-            echo "seems like starting btcpayserver  service has failed - see: systemctl status btcpayserver"
-            echo "maybe report here: https://github.com/rootzoll/raspiblitz/issues/214"
-          fi
-      done
-    else
-      echo "Because the system is not 'ready' the service 'btcpayserver' will not be started at this point .. its enabled and will start on next reboot"
-    fi
-    
-    sudo -u btcpay mkdir -p /home/btcpay/.btcpayserver/Main/
-
-    /home/admin/config.scripts/bonus.btcpayserver.sh write-tls-macaroon
-
+  if [ "${state}" == "ready" ]; then
+    echo "# Starting nbxplorer"
+    sudo systemctl start nbxplorer
+    echo "# Checking for nbxplorer config"
+    while [ ! -f "/home/btcpay/.nbxplorer/Main/settings.config" ]; do
+      echo "# Waiting for nbxplorer to start - CTRL+C to abort"
+      sleep 10
+      hasFailed=$(sudo systemctl status nbxplorer | grep -c "Active: failed")
+      if [ ${hasFailed} -eq 1 ]; then
+        echo "# seems like starting nbxplorer service has failed - see: systemctl status nbxplorer"
+        echo "# maybe report here: https://github.com/rootzoll/raspiblitz/issues/214"
+      fi
+    done
   else
-    echo "BTCPay Server is already installed."
+    echo "# Because the system is not 'ready' the service 'nbxplorer' will not be started at this point .. its enabled and will start on next reboot"
+  fi
 
-    if [ "${state}" == "ready" ]; then
-      # start service
-      echo "start service"
-      sudo systemctl start nbxplorer 2>/dev/null
-      sudo systemctl start btcpayserver 2>/dev/null
+  NBXplorerConfig
+
+  # determine bitcoin.conf network prefix based on chain
+  if [ "${chain}" = "main" ]; then
+    btcprefix="main"
+  elif [ "${chain}" = "test" ]; then
+    btcprefix="test"
+  elif [ "${chain}" = "sig" ]; then
+    btcprefix="signet"
+  else
+    btcprefix="main"
+  fi
+
+  # whitelist connection in bitcoind
+  # migrate old non-prefixed whitebind to network-prefixed format
+  sudo sed -i "s/^whitebind=127.0.0.1:8336/${btcprefix}.whitebind=127.0.0.1:8336/g" /mnt/hdd/app-data/bitcoin/bitcoin.conf
+  # ensure network-prefixed whitebind exists
+  if ! sudo grep -Eq "^${btcprefix}.whitebind=127.0.0.1:8336" /mnt/hdd/app-data/bitcoin/bitcoin.conf; then
+    echo "${btcprefix}.whitebind=127.0.0.1:8336" | sudo tee -a /mnt/hdd/app-data/bitcoin/bitcoin.conf
+    bitcoindRestart=yes
+  fi
+
+  if [ "${state}" == "ready" ]; then
+    if [ "${bitcoindRestart}" == "yes" ]; then
+      echo "# Restarting bitcoind"
+      sudo systemctl restart bitcoind
     fi
+    sudo systemctl restart nbxplorer
+  fi
 
+  BtcPayConfig
+
+  BtcPayService
+
+  sudo systemctl enable btcpayserver
+  if [ "${state}" == "ready" ]; then
+    echo "# Starting btcpayserver"
+    sudo systemctl start btcpayserver
+    echo "# Checking for btcpayserver config"
+    while [ ! -f "/home/btcpay/.btcpayserver/Main/settings.config" ]; do
+      echo "# Waiting for btcpayserver to start - CTRL+C to abort .."
+      sleep 30
+      hasFailed=$(sudo systemctl status btcpayserver | grep -c "Active: failed")
+      if [ ${hasFailed} -eq 1 ]; then
+        echo "# seems like starting btcpayserver service has failed - see: systemctl status btcpayserver"
+        echo "# maybe report here: https://github.com/rootzoll/raspiblitz/issues/214"
+      fi
+    done
+  else
+    echo "# Because the system is not 'ready' the service 'btcpayserver' will not be started at this point .. it is enabled and will start on next reboot"
+  fi
+
+  if [ "${lnd}" = on ]; then
+    /home/admin/config.scripts/bonus.btcpayserver.sh write-tls-macaroon
+  fi
+  if [ "${cl}" = on ]; then
+    /home/admin/config.scripts/bonus.btcpayserver.sh cln-lightning-rpc-access
   fi
 
   # setting value in raspi blitz config
-  sudo sed -i "s/^BTCPayServer=.*/BTCPayServer=on/g" /mnt/hdd/raspiblitz.conf
+  /home/admin/config.scripts/blitz.conf.sh set BTCPayServer "on"
+
+  # needed for API/WebUI as signal that install ran thru
+  echo "result='OK'"
   exit 0
 fi
 
-# switch off
+########################################
+# OFF (deactivate)
+########################################
+
 if [ "$1" = "0" ] || [ "$1" = "off" ]; then
 
   # check for second parameter: should data be deleted?
@@ -496,68 +756,161 @@ if [ "$1" = "0" ] || [ "$1" = "off" ]; then
   elif [ "$2" = "--keep-data" ]; then
     deleteData=0
   else
-    if (whiptail --title " DELETE DATA? " --yesno "Do you want want to delete\nthe BTCPay Server Data?" 8 30); then
+    if (whiptail --title " DELETE DATA? " --yesno "Do you want to delete\nthe BTCPay Server Data?" 8 30); then
       deleteData=1
-   else
+    else
       deleteData=0
     fi
   fi
   echo "# deleteData(${deleteData})"
 
   # setting value in raspi blitz config
-  sudo sed -i "s/^BTCPayServer=.*/BTCPayServer=off/g" /mnt/hdd/raspiblitz.conf
+  /home/admin/config.scripts/blitz.conf.sh set BTCPayServer "off"
 
   # Hidden Service if Tor is active
   if [ "${runBehindTor}" = "on" ]; then
-    /home/admin/config.scripts/internet.hiddenservice.sh off btcpay
+    /home/admin/config.scripts/tor.onion-service.sh off btcpay
   fi
 
-  isInstalled=$(sudo ls /etc/systemd/system/btcpayserver.service 2>/dev/null | grep -c 'btcpayserver.service')
-  if [ ${isInstalled} -eq 1 ]; then
-    echo "# *** REMOVING BTCPAYSERVER, NBXPLORER and .NET ***"
-    # removing services
-    # btcpay
-    sudo systemctl stop btcpayserver
-    sudo systemctl disable btcpayserver
-    sudo rm /etc/systemd/system/btcpayserver.service
-    # nbxplorer
-    sudo systemctl stop nbxplorer
-    sudo systemctl disable nbxplorer
-    sudo rm /etc/systemd/system/nbxplorer.service
-    # clear dotnet cache
-    dotnet nuget locals all --clear
-    sudo rm -rf /tmp/NuGetScratch
-    # remove dotnet
-    sudo rm -rf /usr/share/dotnet
-    # clear app config (not user data)
-    sudo rm -f /home/btcpay/.nbxplorer/Main/settings.config
-    sudo rm -f /home/btcpay/.btcpayserver/Main/settings.config
-    # clear nginx config (from btcpaysetdomain)
-    sudo rm -f /etc/nginx/sites-enabled/btcpayserver
-    sudo rm -f /etc/nginx/sites-available/btcpayserver
-    # remove nginx symlinks
-    sudo rm -f /etc/nginx/sites-enabled/btcpay_ssl.conf
-    sudo rm -f /etc/nginx/sites-enabled/btcpay_tor.conf
-    sudo rm -f /etc/nginx/sites-enabled/btcpay_tor_ssl.conf
-    sudo rm -f /etc/nginx/sites-available/btcpay_ssl.conf
-    sudo rm -f /etc/nginx/sites-available/btcpay_tor.conf
-    sudo rm -f /etc/nginx/sites-available/btcpay_tor_ssl.conf
-    sudo nginx -t
-    sudo systemctl reload nginx
-    # nuke user
-    sudo userdel -rf btcpay 2>/dev/null
-    if [ ${deleteData} -eq 1 ]; then
-      echo "# deleting data"
-      sudo rm -R /mnt/hdd/app-data/.btcpayserver/
-    else
-      echo "# keeping data"
-    fi
-    echo "# OK BTCPayServer removed."
+  # removing service: btcpay
+  sudo systemctl stop btcpayserver
+  sudo systemctl disable btcpayserver
+  sudo rm /etc/systemd/system/btcpayserver.service
+
+  # removing service: nbxplorer
+  sudo systemctl stop nbxplorer
+  sudo systemctl disable nbxplorer
+  sudo rm /etc/systemd/system/nbxplorer.service
+
+  # clear app config (not user data)
+  sudo rm -f /home/btcpay/.nbxplorer/Main/settings.config
+  sudo rm -f /home/btcpay/.btcpayserver/Main/settings.config
+
+  # clear nginx config (from btcpaysetdomain)
+  sudo rm -f /etc/nginx/sites-enabled/btcpayserver
+  sudo rm -f /etc/nginx/sites-available/btcpayserver
+
+  # remove nginx symlinks
+  sudo rm -f /etc/nginx/sites-enabled/btcpay_ssl.conf
+  sudo rm -f /etc/nginx/sites-enabled/btcpay_tor.conf
+  sudo rm -f /etc/nginx/sites-enabled/btcpay_tor_ssl.conf
+  sudo rm -f /etc/nginx/sites-available/btcpay_ssl.conf
+  sudo rm -f /etc/nginx/sites-available/btcpay_tor.conf
+  sudo rm -f /etc/nginx/sites-available/btcpay_tor_ssl.conf
+  sudo nginx -t
+  sudo systemctl reload nginx
+
+  if [ ${deleteData} -eq 1 ]; then
+    echo "# deleting data"
+    sudo -u postgres psql -c "drop database nbxplorermainnet;"
+    sudo -u postgres psql -c "drop user nbxplorer;"
+    sudo -u postgres psql -c "drop database btcpaymainnet;"
+    sudo -u postgres psql -c "drop user btcpay;"
+    sudo rm -R /mnt/hdd/app-data/.btcpayserver/
   else
-    echo "# BTCPayServer is not installed."
+    echo "# keeping data"
   fi
+  echo "# OK BTCPayServer deactivated."
+
+  # needed for API/WebUI as signal that install ran thru
+  echo "result='OK'"
+
   exit 0
 fi
 
-echo "FAIL - Unknown Parameter $1"
+# backup
+if [ "$1" = "backup" ]; then
+  sudo systemctl stop btcpayserver
+  echo "# Start the backup of btcpaymainnet database"
+  sudo /home/admin/config.scripts/bonus.postgresql.sh backup btcpaymainnet
+  sudo systemctl start btcpayserver
+  exit 0
+fi
+
+# restore
+if [ "$1" = "restore" ]; then
+  sudo systemctl stop btcpayserver
+  echo "# Restore btcpaymainnet PostgreSQL database"
+  if [ "$2" != "" ]; then
+    backup_file=$2
+    sudo /home/admin/config.scripts/bonus.postgresql.sh restore btcpaymainnet btcpay raspiblitz "${backup_file}"
+  else
+    sudo /home/admin/config.scripts/bonus.postgresql.sh restore btcpaymainnet btcpay raspiblitz
+  fi
+  sudo systemctl start btcpayserver
+  exit 0
+fi
+
+if [ "$1" = "update" ]; then
+  sudo systemctl stop btcpayserver 2>/dev/null
+  sudo systemctl stop nbxplorer 2>/dev/null
+
+  DotNetInstall
+
+  # prevent the git error 'detected dubious ownership in repository'
+  git config --global --add safe.directory /home/btcpay/NBXplorer
+  git config --global --add safe.directory /home/btcpay/btcpayserver
+
+  echo "# Update NBXplorer to $NBXplorerVersion"
+  cd /home/btcpay || exit 1
+  cd NBXplorer || exit 1
+  if [ "$(sudo -u btcpay git fetch --tags 2>&1 | grep -c "Please tell me who you are")" -gt 0 ]; then
+    sudo -u btcpay git config user.email "you@example.com"
+    sudo -u btcpay git config user.name "Your Name"
+    sudo -u btcpay git fetch --tags
+  fi
+  echo "# Reset NBXplorer to release tag: $NBXplorerVersion"
+  sudo -u btcpay git reset --hard "$NBXplorerVersion"
+  sudo -u btcpay /home/admin/config.scripts/blitz.git-verify.sh \
+    "${PGPsigner}" "${PGPpubkeyLink}" "${PGPpubkeyFingerprint}" || exit 1
+
+  echo "# Build NBXplorer $NBXplorerVersion"
+  sudo -u btcpay /home/btcpay/dotnet/dotnet build -c Release NBXplorer/NBXplorer.csproj || exit 1
+
+  # whitelist localhost in bitcoind
+  if ! sudo grep -Eq "^whitelist=127.0.0.1" /mnt/hdd/app-data/bitcoin/bitcoin.conf; then
+    echo "whitelist=127.0.0.1" | sudo tee -a /mnt/hdd/app-data/bitcoin/bitcoin.conf
+    echo "# Restarting bitcoind"
+    sudo systemctl restart bitcoind
+  fi
+
+  NBXplorerConfig
+  sudo systemctl start nbxplorer
+  echo "# Updated NBXplorer to $NBXplorerVersion"
+
+  # always stop to BtcPayConfig
+  sudo systemctl stop btcpayserver 2>/dev/null
+
+  BtcPayConfig
+
+  # always update the btcpayserver.service
+  BtcPayService
+
+  echo "# Update BTCPayServer"
+  cd /home/btcpay || exit 1
+  cd btcpayserver || exit 1
+  if [ "$(sudo -u btcpay git fetch --tags 2>&1 | grep -c "Please tell me who you are")" -gt 0 ]; then
+    sudo -u btcpay git config user.email "you@example.com"
+    sudo -u btcpay git config user.name "Your Name"
+    sudo -u btcpay git fetch --tags
+  fi
+  echo "# Reset BTCPayServer to release tag: $BTCPayVersion"
+  sudo -u btcpay git reset --hard "$BTCPayVersion"
+
+  echo "# verify signature of ${PGPsigner}"
+  if ! sudo -u btcpay /home/admin/config.scripts/blitz.git-verify.sh "${PGPsigner}" "${PGPpubkeyLink}" "${PGPpubkeyFingerprint}"; then
+    # try with webflow
+    sudo -u btcpay /home/admin/config.scripts/blitz.git-verify.sh "web-flow" "https://github.com/web-flow.gpg" "B5690EEEBB952194" || exit 1
+  fi
+
+  echo "# Build BTCPayServer $BTCPayVersion"
+  sudo -u btcpay /home/btcpay/dotnet/dotnet build -c Release /home/btcpay/btcpayserver/BTCPayServer/BTCPayServer.csproj || exit 1
+  echo "# Updated BTCPayServer to $BTCPayVersion"
+
+  # always start after BtcPayConfig
+  sudo systemctl start btcpayserver
+  exit 0
+fi
+
+echo "# FAIL - Unknown Parameter $1"
 exit 1

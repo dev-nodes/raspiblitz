@@ -6,9 +6,9 @@ USERNAME=stackingsats
 APP_DATA_DIR=/mnt/hdd/app-data/stacking-sats-kraken
 HOME_DIR=/home/$USERNAME
 CONFIG_FILE=$APP_DATA_DIR/.env
-RASPIBLITZ_FILE=/mnt/hdd/raspiblitz.conf
+SCRIPT_DIR=$HOME_DIR/stacking-sats-kraken
 SCRIPT_NAME=stacksats.sh
-SCRIPT_VERSION=0.2.0
+SCRIPT_VERSION=0.4.4
 
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
@@ -28,7 +28,10 @@ if [ "$1" = "1" ] || [ "$1" = "on" ]; then
     /home/admin/config.scripts/bonus.nodejs.sh on
 
     # add user
-    sudo adduser --disabled-password --gecos "" $USERNAME
+    echo "# add the user: ${USERNAME}"
+    sudo adduser --system --group --shell /bin/bash --home /home/${USERNAME} ${USERNAME}
+    echo "Copy the skeleton files for login"
+    sudo -u ${USERNAME} cp -r /etc/skel/. /home/${USERNAME}/
 
     # install stacking-sats-kraken
     cd $HOME_DIR
@@ -57,6 +60,20 @@ KRAKEN_API_SECRET="privateKeyFromTheKrakenSettings"
 KRAKEN_API_FIAT="USD"
 KRAKEN_BUY_AMOUNT=21
 
+# Enable this to buy at market price instead of placing a limit order
+# KRAKEN_ORDER_TYPE="market"
+
+# Pay fee in this currency, e.g. buying XBT for USD and paying fee in XBT
+# KRAKEN_FEE_CURRENCY="XBT"
+
+# Set this if you live in Germany and get the EOrder:Trading agreement required error.
+# See https://support.kraken.com/hc/en-us/articles/360000920026
+# KRAKEN_GERMANY_TRADING_AGREEMENT="agree"
+
+# Optional settings for withdrawal
+# KRAKEN_MAX_REL_FEE=0.5 # maximum fee in % that you are willing to pay
+# KRAKEN_WITHDRAW_KEY="descriptionOfWithdrawalAddress"
+
 # Optional settings for confirmation mail – requires `blitz.notify.sh on`
 # KRAKEN_MAIL_SUBJECT="Sats got stacked"
 # KRAKEN_MAIL_FROM_ADDRESS="humble@satstacker.org"
@@ -81,14 +98,21 @@ set -e
 export NODE_OPTIONS="--no-deprecation"
 
 # load config
-set -a; source /mnt/hdd/app-data/stacking-sats-kraken/.env; set +a
+env="/mnt/hdd/app-data/stacking-sats-kraken/.env"
+set -a; . ${env}; set +a
+# alternative config
+test -f "${env}-"${2} && { set -a; . "${env}-"${2}; set +a; }
+
+# switch directory
+cd $(cd `dirname $0` && pwd)
 
 # run script
-cd ./stacking-sats-kraken
+cmd=${1:-"stack"}
+
 if [[ "${KRAKEN_DRY_RUN_PLACE_NO_ORDER}" ]]; then
-  result=$(node index.js --validate 2>&1)
+  result=$(npm run test:$cmd --silent 2>&1)
 else
-  result=$(node index.js 2>&1)
+  result=$(npm run $cmd --silent 2>&1)
 fi
 echo "$result"
 
@@ -101,20 +125,20 @@ if [[ "${KRAKEN_MAIL_SUBJECT}" && "${KRAKEN_MAIL_FROM_ADDRESS}" && "${KRAKEN_MAI
 fi
 ' > $scriptFile
 
-    sudo mv $scriptFile $HOME_DIR/$SCRIPT_NAME
-    sudo chown $USERNAME:$USERNAME $HOME_DIR/$SCRIPT_NAME
+    sudo mv $scriptFile $SCRIPT_DIR/$SCRIPT_NAME
+    sudo chown $USERNAME:$USERNAME $SCRIPT_DIR/$SCRIPT_NAME
 
     echo "OK - the STACKING-SATS-KRAKEN script is now installed."
     echo ""
     echo "Switch to the '$USERNAME' user and adapt the settings in $CONFIG_FILE"
 
     # setting value in raspi blitz config
-    grep -q '^stackingSatsKraken' $RASPIBLITZ_FILE && sudo sed -i "s/^stackingSatsKraken=.*/stackingSatsKraken=on/g" $RASPIBLITZ_FILE || echo 'stackingSatsKraken=on' >> $RASPIBLITZ_FILE
+    /home/admin/config.scripts/blitz.conf.sh set stackingSatsKraken "on"
   else
     echo "STACKING-SATS-KRAKEN already installed."
   fi
 
-  cron_count=$(sudo -u $USERNAME crontab -l | grep "$SCRIPT_NAME" -c)
+  cron_count=$(sudo -u $USERNAME crontab -l | grep "$SCRIPT_DIR/$SCRIPT_NAME" -c)
   if [ "${cron_count}" = "0" ]; then
     echo ""
     echo "You might want to set up a cronjob to run the script in regular intervals."
@@ -124,7 +148,7 @@ fi
     echo ""
     echo "SHELL=/bin/bash"
     echo "PATH=/bin:/usr/sbin:/usr/bin:/usr/local/bin"
-    echo "15 6 * * * $HOME_DIR/$SCRIPT_NAME > /dev/null 2>&1"
+    echo "15 6 * * * $SCRIPT_DIR/$SCRIPT_NAME > /dev/null 2>&1"
   fi
 
   exit 0
@@ -139,7 +163,7 @@ if [ "$1" = "0" ] || [ "$1" = "off" ]; then
     echo "*** REMOVING STACKING-SATS-KRAKEN ***"
 
     # setting value in raspi blitz config
-    sudo sed -i "s/^stackingSatsKraken=.*/stackingSatsKraken=off/g" $RASPIBLITZ_FILE
+    /home/admin/config.scripts/blitz.conf.sh set stackingSatsKraken "off"
 
     # remove config
     sudo rm -rf $APP_DATA_DIR

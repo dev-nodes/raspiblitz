@@ -11,7 +11,8 @@ import time
 from datetime import datetime
 
 import toml
-from blitzpy import RaspiBlitzConfig
+sys.path.append('/home/admin/raspiblitz/home.admin/BlitzPy/blitzpy')
+from config import RaspiBlitzConfig
 from dialog import Dialog
 
 # constants for standard services
@@ -110,7 +111,7 @@ You have no active or inactive subscriptions.
         "\nYou have the following subscriptions - select for details:",
         choices=choices, cancel_label="Back", width=65, height=15, title="My Subscriptions")
 
-    # if user chosses CANCEL
+    # if user chooses CANCEL
     if code != d.OK:
         return
 
@@ -227,7 +228,7 @@ def main():
         "\nCheck existing subscriptions or create new:",
         choices=choices, width=50, height=10, title="Subscription Management")
 
-    # if user chosses CANCEL
+    # if user chooses CANCEL
     if code != d.OK:
         sys.exit(0)
 
@@ -261,10 +262,10 @@ def main():
         cfg.reload()
         if not cfg.run_behind_tor.value:
             Dialog(dialog="dialog", autowidgetsize=True).msgbox('''
-    The IP2TOR service just makes sense if you run
-    your RaspiBlitz behind TOR.
+    The IP2TOR service just makes sense if you
+    run your RaspiBlitz behind TOR.
             ''', title="Info")
-            sys.exit(1)
+            sys.exit(0)
 
         os.system("clear")
         print("please wait ..")
@@ -315,7 +316,7 @@ def main():
             "\nChoose RaspiBlitz Service to create Bridge for:",
             choices=choices, width=60, height=10, title="Select Service")
 
-        # if user chosses CANCEL
+        # if user chooses CANCEL
         if code != d.OK:
             sys.exit(0)
 
@@ -325,25 +326,25 @@ def main():
         if tag == "REST":
             # get TOR address for REST
             service_name = SERVICE_LND_REST_API
-            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/tor/lndrest8080/hostname'],
+            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/app-data/tor/lndrest/hostname'],
                                          stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
             tor_port = 8080
         if tag == "GRPC":
             # get TOR address for GRPC
             service_name = SERVICE_LND_GRPC_API
-            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/tor/lndrpc10009/hostname'],
+            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/app-data/tor/lndrpc/hostname'],
                                          stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
             tor_port = 10009
         if tag == "LNBITS":
             # get TOR address for LNBits
             service_name = SERVICE_LNBITS
-            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/tor/lnbits/hostname'],
+            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/app-data/tor/lnbits/hostname'],
                                          stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
             tor_port = 443
         if tag == "BTCPAY":
             # get TOR address for BTCPAY
             service_name = SERVICE_BTCPAY
-            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/tor/btcpay/hostname'],
+            tor_address = subprocess.run(['sudo', 'cat', '/mnt/hdd/app-data/tor/btcpay/hostname'],
                                          stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
             tor_port = 443
         if tag == "SELF":
@@ -380,7 +381,7 @@ def main():
             except Exception as e:
                 print(e)
                 time.sleep(3)
-                sys.exit(1)
+                sys.exit(0)
 
         # run creating a new IP2TOR subscription
         os.system("clear")
@@ -388,8 +389,8 @@ def main():
             service_name, tor_address, tor_port)
         print("# running: {0}".format(cmd))
         os.system(cmd)
-        sys.exit(0)
 
+        sys.exit(0)
 
 if __name__ == '__main__':
     main()

@@ -7,20 +7,21 @@ SERVER_PORT=3030
 APP_DATA_DIR=/mnt/hdd/app-data/kindle-display
 HOME_DIR=/home/$USERNAME
 CONFIG_FILE=$APP_DATA_DIR/.env
-RASPIBLITZ_FILE=/mnt/hdd/raspiblitz.conf
 APP_ROOT_DIR=$HOME_DIR/kindle-display
 APP_SERVER_DIR=$APP_ROOT_DIR/server
 CRON_FILE=$APP_SERVER_DIR/cron.sh
-APP_VERSION=0.4.0
+APP_VERSION=0.5.3
 
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
  echo "small config script to switch kindle-display on or off"
  echo "bonus.kindle-display.sh [on|off]"
+ echo "bonus.kindle-display.sh [update]"
  exit 1
 fi
 
 source /home/admin/raspiblitz.info
+source <(/home/admin/_cache.sh get state)
 
 # switch on
 if [ "$1" = "1" ] || [ "$1" = "on" ]; then
@@ -29,13 +30,14 @@ if [ "$1" = "1" ] || [ "$1" = "on" ]; then
   isInstalled=$(sudo ls $HOME_DIR 2>/dev/null | grep -c 'kindle-display')
   if [ ${isInstalled} -eq 0 ]; then
     # install dependencies
-    sudo apt install -y firefox-esr pngcrush jo jq
+    sudo apt update
+    sudo apt install -y firefox-esr pngcrush jo jq torsocks
 
     # install nodeJS
     /home/admin/config.scripts/bonus.nodejs.sh on
 
     # add user
-    sudo adduser --disabled-password --gecos "" $USERNAME
+    sudo adduser --system --group --home /home/$USERNAME $USERNAME
 
     # install kindle-display
     echo "# install .."
@@ -52,8 +54,8 @@ if [ "$1" = "1" ] || [ "$1" = "on" ]; then
     fi
 
     # setup kindle-display config
-    RPC_USER=$(sudo cat /mnt/hdd/${network}/${network}.conf | grep rpcuser | cut -c 9-)
-    RPC_PASS=$(sudo cat /mnt/hdd/${network}/${network}.conf | grep rpcpassword | cut -c 13-)
+    RPC_USER=$(sudo cat /mnt/hdd/app-data/${network}/${network}.conf | grep rpcuser | cut -c 9-)
+    RPC_PASS=$(sudo cat /mnt/hdd/app-data/${network}/${network}.conf | grep rpcpassword | cut -c 13-)
 
     sudo mkdir -p $APP_DATA_DIR
     sudo chown $USERNAME:$USERNAME $APP_DATA_DIR
@@ -126,6 +128,12 @@ Restart=on-failure
 StartLimitIntervalSec=600
 StartLimitBurst=2
 
+# Hardening measures
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+PrivateDevices=true
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -144,27 +152,64 @@ EOF
       sudo -u $USERNAME $CRON_FILE
     fi
 
+    # set cronjob
+    echo "# setting cronbjob for kindle-display (default: every 5 minutes)"
+    echo "# /etc/cron.d/kindle-display
+SHELL=/bin/bash
+PATH=/bin:/usr/bin:/usr/local/bin
+# m h dom mon dow user-name command to be executed
+*/5 * * * * $USERNAME $CRON_FILE >/dev/null 2>&1" | sudo tee /etc/cron.d/kindle-display >/dev/null
+
     echo "OK - the KINDLE-DISPLAY script is now installed."
     echo ""
     echo "Switch to the '$USERNAME' user and adapt the settings in $CONFIG_FILE"
 
     # setting value in raspi blitz config
-    grep -q '^kindleDisplay' $RASPIBLITZ_FILE && sudo sed -i "s/^kindleDisplay=.*/kindleDisplay=on/g" $RASPIBLITZ_FILE || echo 'kindleDisplay=on' >> $RASPIBLITZ_FILE
+    /home/admin/config.scripts/blitz.conf.sh set kindleDisplay "on"
   else
     echo "KINDLE-DISPLAY already installed."
   fi
 
-  cron_count=$(sudo -u $USERNAME crontab -l | grep "$CRON_FILE" -c)
-  if [ "${cron_count}" = "0" ]; then
-    echo ""
-    echo "You might want to set up a cronjob to run the script in regular intervals."
-    echo "As the '$USERNAME' user you can run the 'crontab -e' command."
-    echo ""
-    echo "Here is an example for updating every five minutes ..."
-    echo ""
-    echo "SHELL=/bin/bash"
-    echo "PATH=/bin:/usr/bin:/usr/local/bin"
-    echo "*/5 * * * * $CRON_FILE > /dev/null 2>&1"
+  exit 0
+fi
+
+# update
+if [ "$1" = "update" ]; then
+  isInstalled=$(sudo ls $HOME_DIR 2>/dev/null | grep -c kindle-display)
+  if [ ${isInstalled} -gt 0 ]; then
+    echo "*** UPDATE KINDLE-DISPLAY ***"
+    cd $HOME_DIR || exit 1
+
+    current=$(node -p "require('./kindle-display/server/package.json').version")
+    if [ "$current" = "$APP_VERSION" ]; then
+      echo "*** KINDLE-DISPLAY IS ALREADY UPDATED TO $APP_VERSION ***"
+      exit 0
+    fi
+
+    sudo systemctl stop kindle-display
+    sudo -u $USERNAME wget https://github.com/dennisreimann/kindle-display/archive/v$APP_VERSION.tar.gz
+    sudo -u $USERNAME tar -xzf v$APP_VERSION.tar.gz kindle-display-$APP_VERSION/server
+    sudo -u $USERNAME mv kindle-display{,-backup}
+    sudo -u $USERNAME mv kindle-display{-$APP_VERSION,}
+    sudo -u $USERNAME rm v$APP_VERSION.tar.gz
+    cd kindle-display/server
+    sudo -u $USERNAME npm install
+    if ! [ $? -eq 0 ]; then
+        echo "FAIL - npm install did not run correctly, aborting"
+        exit 1
+    fi
+    # link config to app
+    sudo -u $USERNAME ln -s $CONFIG_FILE $APP_SERVER_DIR/.env
+    # generate initial data
+    echo "# run data.sh"
+    sudo -u $USERNAME $APP_SERVER_DIR/data.sh
+    cd -
+    sudo systemctl start kindle-display
+    sudo -u $USERNAME rm -rf kindle-display-backup
+
+    echo "*** KINDLE-DISPLAY UPDATED to $APP_VERSION ***"
+  else
+    echo "*** KINDLE-DISPLAY IS NOT INSTALLED ***"
   fi
 
   exit 0
@@ -179,12 +224,13 @@ if [ "$1" = "0" ] || [ "$1" = "off" ]; then
     echo "*** REMOVING KINDLE-DISPLAY ***"
 
     # setting value in raspi blitz config
-    sudo sed -i "s/^kindleDisplay=.*/kindleDisplay=off/g" $RASPIBLITZ_FILE
+    /home/admin/config.scripts/blitz.conf.sh set kindleDisplay "off"
 
     # uninstall service
     sudo systemctl stop kindle-display
     sudo systemctl disable kindle-display
     sudo rm /etc/systemd/system/kindle-display.service
+    sudo rm -f /etc/cron.d/kindle-display
 
     # close port on firewall
     sudo ufw deny $SERVER_PORT
